@@ -116,10 +116,13 @@ not need to add or remove kernel routes.
 
 ## Note
 
-Defect 1 also returns `SOCKET_ERROR` from the process callback. The server
-may deactivate the client for that. This is acceptable: `fRunning` is already
-false, so the next cycle returns 0 at once, and the manager reaps the master
-within one loop pass.
+Defect 1 also returns `SOCKET_ERROR` from the process callback. What the
+server does with it is traced, not guessed: for an internal client like
+netmanager, `JackClient::CycleSignalAux` sees `status != 0` and calls
+`End()`, which clears `fActive` and deactivates the client — the graph
+stops scheduling it at all. That is acceptable, even helpful: `fRunning`
+is already false, any cycle that still runs returns 0 immediately, and
+the manager reaps the master within one loop pass (at most 2 s).
 
 The slave reconnect loop (`JackNetSlaveInterface::Init`) stays unbounded. A
 legitimate slave waits there for its master. Defect 3's correction is what
