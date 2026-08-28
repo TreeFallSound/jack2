@@ -46,6 +46,7 @@ namespace Jack
         fSockfd = 0;
         fPort = 0;
         fTimeOut = 0;
+        fMcastIF[0] = '\0';
         fSendAddr.sin_family = AF_INET;
         fSendAddr.sin_addr.s_addr = htonl(INADDR_ANY);
         memset(&fSendAddr.sin_zero, 0, 8);
@@ -59,6 +60,7 @@ namespace Jack
         fSockfd = 0;
         fPort = port;
         fTimeOut = 0;
+        fMcastIF[0] = '\0';
         fSendAddr.sin_family = AF_INET;
         fSendAddr.sin_port = htons(port);
         inet_aton(ip, &fSendAddr.sin_addr);
@@ -76,6 +78,7 @@ namespace Jack
         fPort = socket.fPort;
         fSendAddr = socket.fSendAddr;
         fRecvAddr = socket.fRecvAddr;
+        strcpy(fMcastIF, socket.fMcastIF);
     }
 
     JackNetUnixSocket::~JackNetUnixSocket()
@@ -90,6 +93,7 @@ namespace Jack
             fPort = socket.fPort;
             fSendAddr = socket.fSendAddr;
             fRecvAddr = socket.fRecvAddr;
+            strcpy(fMcastIF, socket.fMcastIF);
         }
         return *this;
     }
@@ -131,8 +135,19 @@ namespace Jack
         
         res = getsockopt(fSockfd, IPPROTO_IP, IP_TOS, &tos, &len);
         
-        tos = 46 * 4;       // see <netinet/in.h> 
+        tos = 46 * 4;       // see <netinet/in.h>
         res = setsockopt(fSockfd, IPPROTO_IP, IP_TOS, &tos, sizeof(tos));
+
+        // Re-pin the outgoing multicast interface on every fresh socket. The
+        // slave's reconnect loop tears down and rebuilds this socket on each
+        // attempt (SendAvailableToMaster -> NewSocket); without re-applying,
+        // only the very first socket was pinned and a leaked netadapter would
+        // start announcing over whatever interface holds the default route
+        // (i.e. Wi-Fi) once the cable's kernel route was deleted.
+        if (fMcastIF[0] != '\0' && ApplyMulticastIF() == SOCKET_ERROR) {
+            jack_error("NewSocket: can't pin multicast to '%s': %s",
+                       fMcastIF, strerror(NET_ERROR_CODE));
+        }
 
         return fSockfd;
     }
@@ -308,12 +323,28 @@ namespace Jack
 
     int JackNetUnixSocket::SetMulticastIF(const char* ifname)
     {
-        if (ifname == NULL || ifname[0] == '\0') {
+        // Record the choice. Callers set this before NewSocket(), so the
+        // actual setsockopt has to be deferred (and re-done on every socket).
+        if (ifname == NULL) {
+            fMcastIF[0] = '\0';
+        } else {
+            strncpy(fMcastIF, ifname, sizeof(fMcastIF) - 1);
+            fMcastIF[sizeof(fMcastIF) - 1] = '\0';
+        }
+
+        if (fMcastIF[0] == '\0') {
             // No env var set; let the kernel pick the outgoing interface for
             // multicast sendto via its multicast route table.
             return 0;
         }
 
+        // Apply now too, if the socket already exists.
+        return (fSockfd > 0) ? ApplyMulticastIF() : 0;
+    }
+
+    int JackNetUnixSocket::ApplyMulticastIF()
+    {
+        const char* ifname = fMcastIF;
         int idx = if_nametoindex(ifname);
         if (idx == 0) {
             NET_ERROR_CODE = ENODEV;

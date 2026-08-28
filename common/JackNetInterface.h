@@ -22,6 +22,7 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 
 #include "JackNetTool.h"
 #include <limits.h>
+#include <atomic>
 
 namespace Jack
 {
@@ -157,6 +158,13 @@ namespace Jack
             int fCurrentCycleOffset;
             int fMaxCycleOffset;
             bool fSynched;
+            // Raised by FatalRecvError / FatalSendError on the RT process
+            // thread. The manager thread polls IsDead() and reaps the master
+            // off the RT thread — the old code called ThreadExit() from inside
+            // the process callback, leaving the JACK client registered with a
+            // dead RT thread, which made every subsequent audio cycle wait out
+            // the full PACKET_TIMEOUT. See NETJACK-REAPING.md.
+            std::atomic<bool> fDead;
 
             bool Init();
             bool SetParams();
@@ -183,10 +191,11 @@ namespace Jack
 
             JackNetMasterInterface() 
                 : JackNetInterface(), 
-                fRunning(false), 
-                fCurrentCycleOffset(0), 
-                fMaxCycleOffset(0), 
-                fSynched(false)
+                fRunning(false),
+                fCurrentCycleOffset(0),
+                fMaxCycleOffset(0),
+                fSynched(false),
+                fDead(false)
             {}
             JackNetMasterInterface(session_params_t& params, JackNetSocket& socket, const char* multicast_ip)
                     : JackNetInterface(params, socket, multicast_ip), 
@@ -198,6 +207,10 @@ namespace Jack
 
             virtual~JackNetMasterInterface()
             {}
+
+            // True once a fatal socket error has torn the link down. Polled by
+            // JackNetMasterManager to reap the master off the RT thread.
+            bool IsDead() const { return fDead.load(std::memory_order_acquire); }
     };
 
     /**

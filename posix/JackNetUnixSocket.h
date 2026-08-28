@@ -47,6 +47,14 @@ namespace Jack
 
             struct sockaddr_in fSendAddr;
             struct sockaddr_in fRecvAddr;
+
+            // Interface name to pin outgoing multicast to. Stored here rather
+            // than applied immediately: callers (JackNetAdapter) set it before
+            // the socket exists, so the old code did the setsockopt on fd 0 and
+            // never re-applied it. Empty = legacy behavior. Re-applied by every
+            // NewSocket().
+            char fMcastIF[16];
+            int ApplyMulticastIF();
         #if defined(__sun__) || defined(sun)
             int WaitRead();
             int WaitWrite();

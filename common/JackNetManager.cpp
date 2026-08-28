@@ -826,6 +826,11 @@ namespace Jack
         //main loop, wait for data, deal with it and wait again
         do
         {
+            // Reap masters whose RT link died since the last pass. The recv
+            // below has a MANAGER_INIT_TIMEOUT, so this runs at least every 2 s
+            // even when the network is silent.
+            ReapDeadMasters();
+
             session_params_t net_params;
             rx_bytes = fSocket.CatchHost(&net_params, sizeof(session_params_t), 0);
             SessionParamsNToH(&net_params, &host_params);
@@ -870,6 +875,22 @@ namespace Jack
         if (params.fProtocolVersion != NETWORK_PROTOCOL) {
             jack_error("Error : slave '%s' is running with a different protocol %d != %d", params.fName, params.fProtocolVersion, NETWORK_PROTOCOL);
             return NULL;
+        }
+
+        // Dedupe by slave name. A slave that restarts — or a rapid Ethernet
+        // Audio toggle on the pedal — sends a fresh SLAVE_AVAILABLE while its
+        // previous master may still be in the list (its KILL_MASTER lost, or
+        // its link not yet declared dead). Without this, each announcement
+        // spawns another JACK client and the graph fills with pistomp-01,
+        // pistomp-02, ... all fighting for the same ports.
+        for (master_list_it_t it = fMasterList.begin(); it != fMasterList.end(); ) {
+            if (strcmp((*it)->fParams.fName, params.fName) == 0) {
+                jack_info("NetMaster '%s' already present — reaping the stale one before re-init", params.fName);
+                master_list_it_t stale = it++;
+                RemoveMaster(stale);
+            } else {
+                ++it;
+            }
         }
 
         //settings
@@ -925,21 +946,51 @@ namespace Jack
         return it;
     }
 
+    // Remove one master from the list and destroy it. Caller holds no lock —
+    // the manager is single-threaded apart from the RT process callbacks, and
+    // those never touch fMasterList.
+    void JackNetMasterManager::RemoveMaster(master_list_it_t master_it)
+    {
+        JackNetMaster* master = *master_it;
+        if (fAutoSave) {
+            fMasterConnectionList[master->fParams.fName].clear();
+            master->SaveConnections(fMasterConnectionList[master->fParams.fName]);
+        }
+        // Capture the pointer BEFORE erasing: erase() invalidates the iterator,
+        // so the old "erase(it); delete (*it);" was a use-after-free that
+        // deleted whatever garbage the stale iterator dereferenced to.
+        fMasterList.erase(master_it);
+        delete master;
+    }
+
     int JackNetMasterManager::KillMaster(session_params_t* params)
     {
         jack_log("JackNetMasterManager::KillMaster ID = %u", params->fID);
 
         master_list_it_t master_it = FindMaster(params->fID);
         if (master_it != fMasterList.end()) {
-            if (fAutoSave) {
-                fMasterConnectionList[params->fName].clear();
-                (*master_it)->SaveConnections(fMasterConnectionList[params->fName]);
-            }
-            fMasterList.erase(master_it);
-            delete (*master_it);
+            RemoveMaster(master_it);
             return 1;
         }
         return 0;
+    }
+
+    // Reap any master whose RT link has died (FatalRecvError / FatalSendError).
+    // Called from the manager listener loop, i.e. off the RT thread. This is
+    // the path that recovers a yanked cable or a hard-killed slave, where the
+    // multicast KILL_MASTER packet never arrives.
+    void JackNetMasterManager::ReapDeadMasters()
+    {
+        master_list_it_t it = fMasterList.begin();
+        while (it != fMasterList.end()) {
+            if ((*it)->IsDead()) {
+                jack_info("Reaping dead NetMaster '%s' (ID %u)", (*it)->fParams.fName, (*it)->fParams.fID);
+                master_list_it_t dead = it++;
+                RemoveMaster(dead);
+            } else {
+                ++it;
+            }
+        }
     }
 }//namespace
 
