@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a macOS .pkg installer for the sastraxi/jack2 fork.
+# Build a macOS .pkg installer for the TreeFallSound/jack2 fork.
 #
 # The fork carries the pi-stomp/JackBridge patches on top of upstream
 # v1.9.22 (PI controller reset, master-side and slave-side multicast
@@ -30,14 +30,14 @@ STAGING="$BUILD/staging-pkg"
 PKG_OUT_DIR="$BUILD"
 
 # Version: explicit arg wins, else derived from the fork's commit count
-# past v1.9.22 + a short SHA. e.g. 1.9.22+sastraxi.3.gb3bfc408
+# past v1.9.22 + a short SHA. e.g. 1.9.22+treefall.3.gb3bfc408
 if [ $# -ge 1 ]; then
     VERSION="$1"
 else
     BASE="1.9.22"
     COUNT=$(git rev-list --count "v1.9.22..HEAD" 2>/dev/null || echo "0")
     SHORT=$(git rev-parse --short HEAD)
-    VERSION="${BASE}+sastraxi.${COUNT}.g${SHORT}"
+    VERSION="${BASE}+treefall.${COUNT}.g${SHORT}"
 fi
 
 echo "==> jack2 fork @ $(git rev-parse --short HEAD) ($(git log -1 --pretty=%s))"
@@ -77,7 +77,7 @@ python3 ./waf install --destdir="$STAGING"
 
 echo
 echo "==> build the .pkg"
-PKG_ID="com.sastraxi.jack2"
+PKG_ID="com.treefallsound.jack2"
 PKG_OUT="$PKG_OUT_DIR/jack2-${VERSION}.pkg"
 
 # --root: the directory whose contents become the payload (so the
