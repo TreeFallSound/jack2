@@ -116,6 +116,14 @@ namespace Jack
             // Set from JACK_NETJACK_MULTICAST_IF. Empty = legacy INADDR_ANY
             // behavior. See posix/JackNetUnixSocket.cpp::JoinMCastGroup.
             char fMulticastIF[16];
+            // Interface index that master sockets pin unicast egress to.
+            // InitMaster() latches the first SLAVE_AVAILABLE arrival interface
+            // and keeps it. Do not re-latch on later packets: a stray announce
+            // on another interface must not move live masters.
+            int fBoundIF;
+            // True when JACK_NETJACK_MULTICAST_IF sets the pin. Then fBoundIF
+            // comes from fMulticastIF on each InitMaster() and no latch runs.
+            bool fPinFromEnv;
             JackNetSocket fSocket;
             jack_native_thread_t fThread;
             master_list_t fMasterList;

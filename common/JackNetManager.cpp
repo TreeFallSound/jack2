@@ -667,9 +667,12 @@ namespace Jack
         // wrong one. Empty/unset keeps the legacy INADDR_ANY behavior.
         const char* multicast_if = getenv("JACK_NETJACK_MULTICAST_IF");
         fMulticastIF[0] = '\0';
+        fBoundIF = 0;
+        fPinFromEnv = false;
         if (multicast_if) {
             strncpy(fMulticastIF, multicast_if, sizeof(fMulticastIF) - 1);
             fMulticastIF[sizeof(fMulticastIF) - 1] = '\0';
+            fPinFromEnv = true;
         }
 
         for (node = params; node; node = jack_slist_next(node)) {
@@ -818,6 +821,9 @@ namespace Jack
             jack_error("Can't set local loop : %s", StrError(NET_ERROR_CODE));
         }
 
+        //record the arrival interface of each announce (for master egress pin)
+        fSocket.SetRecvIF();
+
         //set a timeout on the multicast receive (the thread can now be cancelled)
         if (fSocket.SetTimeOut(MANAGER_INIT_TIMEOUT) == SOCKET_ERROR) {
             jack_error("Can't set timeout : %s", StrError(NET_ERROR_CODE));
@@ -927,6 +933,31 @@ namespace Jack
             params.fReturnMidiChannels = CountIO(JACK_DEFAULT_MIDI_TYPE, JackPortIsPhysical | JackPortIsInput);
             jack_info("Takes physical %d MIDI output(s) for slave", params.fReturnMidiChannels);
         }
+
+        // Pin the master's command and RT sockets to one interface. A host
+        // with a link-local address on both a direct cable and wifi has two
+        // routes to the slave; without a pin the master's reply can leave by
+        // the wrong one. Use the interface this announce arrived on, latched
+        // once and then kept (see fBoundIF). fSocket is copied into the
+        // master below, so SetBoundIF must run before the copy.
+        int pin_if = 0;
+        if (fPinFromEnv) {
+            pin_if = fSocket.IFNameToIndex(fMulticastIF);
+            if (pin_if == 0) {
+                jack_error("netJACK: interface '%s' not found; master egress not pinned", fMulticastIF);
+            }
+        } else {
+            if (fBoundIF != 0 && !fSocket.IFIndexValid(fBoundIF)) {
+                jack_info("netJACK: pinned interface (ifindex %d) is gone; re-latching", fBoundIF);
+                fBoundIF = 0;
+            }
+            if (fBoundIF == 0 && fSocket.GetLastRecvIF() != 0) {
+                fBoundIF = fSocket.GetLastRecvIF();
+                jack_info("netJACK: pinning masters to ifindex %d", fBoundIF);
+            }
+            pin_if = fBoundIF;
+        }
+        fSocket.SetBoundIF(pin_if);
 
         //create a new master and add it to the list
         JackNetMaster* master = new JackNetMaster(fSocket, params, fMulticastIP);

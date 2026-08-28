@@ -47,6 +47,9 @@ namespace Jack
         fPort = 0;
         fTimeOut = 0;
         fMcastIF[0] = '\0';
+        fBoundIF = 0;
+        fRecvIF = false;
+        fLastRecvIF = 0;
         fSendAddr.sin_family = AF_INET;
         fSendAddr.sin_addr.s_addr = htonl(INADDR_ANY);
         memset(&fSendAddr.sin_zero, 0, 8);
@@ -61,6 +64,9 @@ namespace Jack
         fPort = port;
         fTimeOut = 0;
         fMcastIF[0] = '\0';
+        fBoundIF = 0;
+        fRecvIF = false;
+        fLastRecvIF = 0;
         fSendAddr.sin_family = AF_INET;
         fSendAddr.sin_port = htons(port);
         inet_aton(ip, &fSendAddr.sin_addr);
@@ -79,6 +85,9 @@ namespace Jack
         fSendAddr = socket.fSendAddr;
         fRecvAddr = socket.fRecvAddr;
         strcpy(fMcastIF, socket.fMcastIF);
+        fBoundIF = socket.fBoundIF;
+        fRecvIF = false;
+        fLastRecvIF = 0;
     }
 
     JackNetUnixSocket::~JackNetUnixSocket()
@@ -94,6 +103,9 @@ namespace Jack
             fSendAddr = socket.fSendAddr;
             fRecvAddr = socket.fRecvAddr;
             strcpy(fMcastIF, socket.fMcastIF);
+            fBoundIF = socket.fBoundIF;
+            fRecvIF = false;
+            fLastRecvIF = 0;
         }
         return *this;
     }
@@ -155,6 +167,19 @@ namespace Jack
                        fMcastIF, strerror(NET_ERROR_CODE));
             Close();
             return SOCKET_ERROR;
+        }
+
+        // Fail closed, as for fMcastIF: a master whose egress cannot be pinned
+        // must not fall back to the default route. The caller retries.
+        if (fBoundIF != 0 && ApplyBoundIF() == SOCKET_ERROR) {
+            jack_error("NewSocket: can't pin egress to ifindex %d (%s) - refusing socket",
+                       fBoundIF, strerror(NET_ERROR_CODE));
+            Close();
+            return SOCKET_ERROR;
+        }
+
+        if (fRecvIF) {
+            ApplyRecvIF();
         }
 
         return fSockfd;
@@ -340,6 +365,12 @@ namespace Jack
             fMcastIF[sizeof(fMcastIF) - 1] = '\0';
         }
 
+        // Pin unicast egress to the same interface. IP_MULTICAST_IF only
+        // steers multicast sendto(); the slave's later connect() to the
+        // master and its RT stream are unicast and would otherwise follow
+        // the default route.
+        fBoundIF = (fMcastIF[0] != '\0') ? (int)if_nametoindex(fMcastIF) : 0;
+
         if (fMcastIF[0] == '\0') {
             // No env var set; let the kernel pick the outgoing interface for
             // multicast sendto via its multicast route table.
@@ -379,6 +410,66 @@ namespace Jack
         // calls JoinMCastGroup, so this is the slave's only pin point.
         return SetOption(IPPROTO_IP, IP_BOUND_IF, &idx, sizeof(idx));
 #endif
+    }
+
+    int JackNetUnixSocket::SetBoundIF(int ifindex)
+    {
+        fBoundIF = ifindex;
+        return 0;
+    }
+
+    int JackNetUnixSocket::ApplyBoundIF()
+    {
+        if (!IFIndexValid(fBoundIF)) {
+            NET_ERROR_CODE = ENXIO;
+            return SOCKET_ERROR;
+        }
+#if defined(__linux__)
+    #if defined(IP_UNICAST_IF)
+        // IP_UNICAST_IF takes the index as an int in network byte order.
+        int idx = htonl(fBoundIF);
+        return SetOption(IPPROTO_IP, IP_UNICAST_IF, &idx, sizeof(idx));
+    #else
+        // No socket-level unicast pin. The kernel route table still applies.
+        return 0;
+    #endif
+#else
+        // macOS / BSD: IP_BOUND_IF takes the index as an unsigned int.
+        unsigned int idx = fBoundIF;
+        return SetOption(IPPROTO_IP, IP_BOUND_IF, &idx, sizeof(idx));
+#endif
+    }
+
+    int JackNetUnixSocket::SetRecvIF()
+    {
+        fRecvIF = true;
+        return (fSockfd > 0) ? ApplyRecvIF() : 0;
+    }
+
+    int JackNetUnixSocket::ApplyRecvIF()
+    {
+        int on = 1;
+#if defined(IP_RECVPKTINFO)
+        return SetOption(IPPROTO_IP, IP_RECVPKTINFO, &on, sizeof(on));
+#else
+        return SetOption(IPPROTO_IP, IP_PKTINFO, &on, sizeof(on));
+#endif
+    }
+
+    int JackNetUnixSocket::GetLastRecvIF()
+    {
+        return fLastRecvIF;
+    }
+
+    int JackNetUnixSocket::IFNameToIndex(const char* ifname)
+    {
+        return (ifname && ifname[0]) ? (int)if_nametoindex(ifname) : 0;
+    }
+
+    bool JackNetUnixSocket::IFIndexValid(int ifindex)
+    {
+        char name[IF_NAMESIZE];
+        return ifindex > 0 && if_indextoname(ifindex, name) != NULL;
     }
 
     //options************************************************************************************************************
@@ -582,10 +673,42 @@ namespace Jack
         }
     #endif
         int res;
-        if ((res = recvfrom(fSockfd, buffer, nbytes, flags, reinterpret_cast<socket_address_t*>(&fSendAddr), &addr_len)) < 0) {
-            jack_log("CatchHost fd = %ld err = %s", fSockfd, strerror(errno));
+
+        if (!fRecvIF) {
+            if ((res = recvfrom(fSockfd, buffer, nbytes, flags, reinterpret_cast<socket_address_t*>(&fSendAddr), &addr_len)) < 0) {
+                jack_log("CatchHost fd = %ld err = %s", fSockfd, strerror(errno));
+            }
+            return res;
         }
-        return res;                
+
+        struct iovec iov;
+        iov.iov_base = buffer;
+        iov.iov_len = nbytes;
+
+        char control[CMSG_SPACE(sizeof(struct in_pktinfo))];
+        struct msghdr msg;
+        memset(&msg, 0, sizeof(msg));
+        msg.msg_name = &fSendAddr;
+        msg.msg_namelen = sizeof(socket_address_t);
+        msg.msg_iov = &iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = control;
+        msg.msg_controllen = sizeof(control);
+
+        fLastRecvIF = 0;
+        if ((res = recvmsg(fSockfd, &msg, flags)) < 0) {
+            jack_log("CatchHost fd = %ld err = %s", fSockfd, strerror(errno));
+            return res;
+        }
+
+        for (struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+            if (cmsg->cmsg_level == IPPROTO_IP && cmsg->cmsg_type == IP_PKTINFO) {
+                struct in_pktinfo info;
+                memcpy(&info, CMSG_DATA(cmsg), sizeof(info));
+                fLastRecvIF = info.ipi_ifindex;
+            }
+        }
+        return res;
     }
 
     net_error_t JackNetUnixSocket::GetError()

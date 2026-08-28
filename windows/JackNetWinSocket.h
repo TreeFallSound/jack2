@@ -93,6 +93,14 @@ namespace Jack
             // No-op on Windows; the legacy kernel-picks behavior is preserved.
             int SetMulticastIF(const char* ifname);
 
+            // Unicast egress interface pinning. No-op on Windows; the socket
+            // keeps the legacy kernel-picks-route behavior.
+            int SetBoundIF(int ifindex);
+            int SetRecvIF();
+            int GetLastRecvIF();
+            int IFNameToIndex(const char* ifname);
+            bool IFIndexValid(int ifindex);
+
             //options management
             int SetOption(int level, int optname, const void* optval, SOCKLEN optlen);
             int GetOption(int level, int optname, void* optval, SOCKLEN* optlen);
