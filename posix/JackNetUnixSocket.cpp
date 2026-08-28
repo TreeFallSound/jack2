@@ -144,9 +144,17 @@ namespace Jack
         // only the very first socket was pinned and a leaked netadapter would
         // start announcing over whatever interface holds the default route
         // (i.e. Wi-Fi) once the cable's kernel route was deleted.
+        //
+        // Fail closed: if a pin was requested (JACK_NETJACK_MULTICAST_IF set)
+        // and cannot be applied, refuse the socket rather than let the slave
+        // fall back to the default route. The caller propagates SOCKET_ERROR
+        // and the reconnect loop retries. Only the adapter/slave path ever
+        // sets fMcastIF; the master pins via JoinMCastGroup and is unaffected.
         if (fMcastIF[0] != '\0' && ApplyMulticastIF() == SOCKET_ERROR) {
-            jack_error("NewSocket: can't pin multicast to '%s': %s",
+            jack_error("NewSocket: can't pin multicast to '%s' (%s) - refusing socket",
                        fMcastIF, strerror(NET_ERROR_CODE));
+            Close();
+            return SOCKET_ERROR;
         }
 
         return fSockfd;

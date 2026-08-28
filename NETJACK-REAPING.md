@@ -48,6 +48,12 @@ that slave name. A slave that restarts, or a fast Ethernet Audio toggle on
 the pedal, sends a fresh `SLAVE_AVAILABLE` while the old master is still in
 the list. A duplicate is the result.
 
+The old master often cannot detect this on its own. The restarted slave
+sends to the same multicast group and port, so the old master keeps
+receiving packets and never times out. `FindMaster` only matches `fID`, and
+a re-announcing slave does not carry the old `fID`. So nothing removes the
+stale master.
+
 ### 4. The slave does not pin its multicast interface
 
 `JackNetAdapter` calls `fSocket.SetMulticastIF()` before `NewSocket()`. The
@@ -89,6 +95,10 @@ erases, then deletes:
 `InitMaster` walks the master list first. It reaps every master whose
 `fParams.fName` equals the new slave's name. Then it creates the new master.
 
+`ReapDeadMasters()` runs at the top of the same `Run()` pass, so a
+self-declared-dead master is already gone. A name match in `InitMaster` is
+therefore always a live master, deliberately superseded.
+
 The `sleep 3` in the pi-Stomp `jackbridge-pi-up` helper was a workaround for
 this defect. It can be removed once this correction is in the field.
 
@@ -96,8 +106,13 @@ this defect. It can be removed once this correction is in the field.
 
 `JackNetUnixSocket` stores the interface name in `fMcastIF`. `SetMulticastIF`
 records the name and applies it only if the socket already exists.
-`NewSocket()` re-applies it, through a new private `ApplyMulticastIF()`, and
-logs an error if the interface is not found.
+`NewSocket()` re-applies it, through a new private `ApplyMulticastIF()`.
+
+The re-apply is fail closed. If a pin was asked for and cannot be set,
+`NewSocket()` closes the socket and returns `SOCKET_ERROR`. The slave then
+retries in its reconnect loop instead of announcing on the default route. So
+the "over Wi-Fi" case is handled inside the fork, and the pi teardown does
+not need to add or remove kernel routes.
 
 ## Note
 

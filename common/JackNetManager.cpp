@@ -879,13 +879,22 @@ namespace Jack
 
         // Dedupe by slave name. A slave that restarts — or a rapid Ethernet
         // Audio toggle on the pedal — sends a fresh SLAVE_AVAILABLE while its
-        // previous master may still be in the list (its KILL_MASTER lost, or
-        // its link not yet declared dead). Without this, each announcement
-        // spawns another JACK client and the graph fills with pistomp-01,
-        // pistomp-02, ... all fighting for the same ports.
+        // previous master may still be in the list. Without this, each
+        // announcement spawns another JACK client and the graph fills with
+        // pistomp-01, pistomp-02, ... all fighting for the same ports.
+        //
+        // ReapDeadMasters() ran at the top of this same Run() pass, so every
+        // master that has already declared itself dead (FatalRecvError) is
+        // gone by now. A name match here is therefore always a *live* master
+        // that we are deliberately superseding: the old link isn't reachable
+        // any more but hasn't timed out — commonly because the restarted slave
+        // is now feeding the old master its packets, so that master would
+        // never self-declare dead. Reaping by name is the only way out; the
+        // KILL_MASTER path can't help (one lost multicast packet) and upstream
+        // FindMaster only matches fID, which a re-announcing slave doesn't have.
         for (master_list_it_t it = fMasterList.begin(); it != fMasterList.end(); ) {
             if (strcmp((*it)->fParams.fName, params.fName) == 0) {
-                jack_info("NetMaster '%s' already present — reaping the stale one before re-init", params.fName);
+                jack_info("NetMaster '%s' already present — superseding the live one", params.fName);
                 master_list_it_t stale = it++;
                 RemoveMaster(stale);
             } else {
