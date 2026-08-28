@@ -198,11 +198,12 @@ namespace Jack
                 fDead(false)
             {}
             JackNetMasterInterface(session_params_t& params, JackNetSocket& socket, const char* multicast_ip)
-                    : JackNetInterface(params, socket, multicast_ip), 
-                    fRunning(false), 
-                    fCurrentCycleOffset(0), 
-                    fMaxCycleOffset(0), 
-                    fSynched(false)
+                    : JackNetInterface(params, socket, multicast_ip),
+                    fRunning(false),
+                    fCurrentCycleOffset(0),
+                    fMaxCycleOffset(0),
+                    fSynched(false),
+                    fDead(false)
             {}
 
             virtual~JackNetMasterInterface()
