@@ -80,20 +80,18 @@ echo "==> build the .pkg"
 PKG_ID="com.treefallsound.jack2"
 PKG_OUT="$PKG_OUT_DIR/jack2-${VERSION}.pkg"
 
-# --root: the directory whose contents become the payload (so the
-#         payload layout matches the install-location layout, /usr/local/...)
-# --install-location: the absolute path the payload is rooted at on
-#         the target. The pkg is relocatable to any prefix only if we
-#         don't hardcode paths in dylibs, but our jackd and dylibs use
-#         absolute @rpath-style install_names, so /usr/local is the
-#         only sensible install-location for this fork.
 pkgbuild \
     --root "$STAGING" \
     --identifier "$PKG_ID" \
     --version "$VERSION" \
-    --install-location /usr/local \
+    --install-location / \
     --ownership recommended \
     "$PKG_OUT"
+
+# The staging tree already contains usr/local/... because waf installs with
+# DESTDIR. The package root is therefore /; using /usr/local here would place
+# the payload at /usr/local/usr/local and leave the live JACK installation
+# untouched.
 
 echo
 echo "==> done"
@@ -105,6 +103,5 @@ echo
 echo "Install with:"
 echo "  sudo installer -pkg $PKG_OUT -target /"
 echo
-echo "Verify after install:"
-echo "  /usr/local/bin/jackd --version"
-echo "  strings /usr/local/lib/jack/netmanager.so | grep JACK_NETJACK_MULTICAST_IF"
+echo "JACK netJACK interface pinning landed in netmanager.so:"
+strings /usr/local/lib/jack/netmanager.so | grep -E 'JACK_NETJACK_MULTICAST_IF|pinning masters' || echo "  NOT FOUND — install the package at /usr/local and restart JACK"

@@ -27,7 +27,7 @@ ChangeLog
     kernel-route-table behavior.
   * ``build-macos-pkg.sh`` — produces a ``.pkg`` installer that drops
     the fork's binaries, libs, headers, and intclient ``.so``s into
-    ``/usr/local`` on Apple Silicon (the manual-install prefix; Homebrew
+    ``/usr/local`` on Apple Silicon (the manual-instaSSll prefix; Homebrew
     is at ``/opt/homebrew``). Required because ``installer/build-pkg.sh``
     in the JackRouter repo ``check_jack``s a pre-installed jack2 and
     refuses to build without one — without this, fresh JackRouter users
