@@ -2161,7 +2161,14 @@ int JackCoreAudioDriver::Open(jack_nframes_t buffer_size,
     if (AddListeners() < 0) {
         goto error;
     }
-  
+
+    // Publish the device for client realtime threads.
+    // Our own cycle is an AudioUnit render callback, so CoreAudio has
+    // already put *this* thread in that workgroup; the graph's client
+    // threads are spawned by jack2 and get nothing without this.
+    GetEngineControl()->fCoreAudioDeviceID = (UInt32)fDeviceID;
+    jack_info("JackCoreAudioDriver::Open : published CoreAudio device %d for client workgroup joins", fDeviceID);
+
     return noErr;
 
 error:

@@ -29,6 +29,11 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 #include "driver_interface.h"
 #include "JackLibGlobals.h"
 
+#ifdef __APPLE__
+#include "JackWorkgroup.h"
+#include <stdlib.h>
+#endif
+
 #include <math.h>
 #include <string>
 #include <algorithm>
@@ -557,6 +562,33 @@ void JackClient::SetupRealTime()
     if (fThread.AcquireSelfRealTime(GetEngineControl()->fClientPriority) < 0) {
         jack_error("JackClient::AcquireSelfRealTime error");
     }
+
+#ifdef __APPLE__
+    /*
+        Join the backend device's CoreAudio workgroup. Plain time-constraint
+        realtime is not enough on Apple Silicon: an unjoined thread can still be
+        preempted by WindowServer right before the cycle deadline, which is what
+        makes netmanager's client miss its slot under GUI load.
+
+        Order matters. os_workgroup_join returns EINVAL on a thread that Mach
+        does not consider realtime, so this must come after AcquireSelfRealTime,
+        and it must run here -- on the client's own realtime thread -- because a
+        join cannot be performed on another thread's behalf.
+
+        JACK_NO_WORKGROUP lets a client opt out. A client that already belongs
+        to some other device's workgroup (JackBridge's daemon holds its HAL
+        device's, because it publishes that device's timeline) sets this so we
+        do not fight over its membership.
+
+        Failure is never fatal: the thread simply keeps the realtime scheduling
+        it already had, which is the pre-existing behaviour.
+    */
+    if (getenv("JACK_NO_WORKGROUP") == NULL) {
+        JackWorkgroupJoinSelfForDevice(GetEngineControl()->fCoreAudioDeviceID);
+    } else {
+        jack_info("JackClient::SetupRealTime : JACK_NO_WORKGROUP set, staying out of the backend workgroup");
+    }
+#endif
 }
 
 int JackClient::StartThread()
