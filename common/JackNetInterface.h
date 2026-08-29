@@ -157,7 +157,10 @@ namespace Jack
             bool fRunning;
             int fCurrentCycleOffset;
             int fMaxCycleOffset;
-            bool fSynched;
+            // Written on the RT thread when the sync offset is reached,
+            // read on the manager thread by IsSynched() (supersede guard).
+            // Atomic for the same reason fDead is: cross-thread access.
+            std::atomic<bool> fSynched;
             // Raised by FatalRecvError / FatalSendError on the RT process
             // thread. The manager thread polls IsDead() and reaps the master
             // off the RT thread — the old code called ThreadExit() from inside
@@ -212,6 +215,12 @@ namespace Jack
             // True once a fatal socket error has torn the link down. Polled by
             // JackNetMasterManager to reap the master off the RT thread.
             bool IsDead() const { return fDead.load(std::memory_order_acquire); }
+            // True once the sync exchange with this slave completed and the
+            // RT cycle offset reached fMaxCycleOffset — i.e. the session is
+            // exchanging packets, not merely registered. InitMaster uses this
+            // to decide whether an incoming announce is duplicate discovery
+            // traffic (ignore) or a new incarnation (supersede).
+            bool IsSynched() const { return fSynched.load(std::memory_order_acquire); }
     };
 
     /**

@@ -112,12 +112,24 @@ namespace Jack
         //network init
         if (!JackNetMasterInterface::Init()) {
             jack_error("JackNetMasterInterface::Init() error...");
+            // Close the failed socket now, not at destruction. A failed
+            // handshake (typically ECONNREFUSED from the slave's previous
+            // incarnation, whose connected peer no longer has a listener)
+            // leaves the socket wedged with a queued ICMP error. The manager
+            // retries on the slave's next announce; releasing the fd here
+            // guarantees that retry builds on clean kernel state instead of
+            // inheriting the error queue (docs/plan-replug-recovery.md,
+            // Correction 2b: "must not continue with a socket that does not
+            // operate").
+            fSocket.Close();
             return false;
         }
 
         //set global parameters
         if (!SetParams()) {
             jack_error("SetParams error...");
+            // Same discipline: release the socket before the manager retries.
+            fSocket.Close();
             return false;
         }
 
@@ -239,25 +251,36 @@ namespace Jack
     {
         jack_log("JackNetMaster::FreePorts ID = %u", fParams.fID);
 
+        // Null each slot as its port is unregistered. jack_port_unregister
+        // triggers a graph latency recomputation, which re-enters our
+        // LatencyCallback mid-loop; if the array kept the stale pointer,
+        // that callback fed it to jack_port_set_latency_range and jackd
+        // logged "called with an incorrect port <garbage>" — a use-after-
+        // free visible on every master teardown (docs/plan-replug-recovery.md,
+        // "Also seen"). LatencyCallback skips NULL slots for the same reason.
         int port_index;
         for (port_index = 0; port_index < fParams.fSendAudioChannels; port_index++) {
             if (fAudioCapturePorts[port_index]) {
                 jack_port_unregister(fClient, fAudioCapturePorts[port_index]);
+                fAudioCapturePorts[port_index] = NULL;
             }
         }
         for (port_index = 0; port_index < fParams.fReturnAudioChannels; port_index++) {
             if (fAudioPlaybackPorts[port_index]) {
                 jack_port_unregister(fClient, fAudioPlaybackPorts[port_index]);
+                fAudioPlaybackPorts[port_index] = NULL;
             }
         }
         for (port_index = 0; port_index < fParams.fSendMidiChannels; port_index++) {
             if (fMidiCapturePorts[port_index]) {
                 jack_port_unregister(fClient, fMidiCapturePorts[port_index]);
+                fMidiCapturePorts[port_index] = NULL;
             }
         }
         for (port_index = 0; port_index < fParams.fReturnMidiChannels; port_index++) {
             if (fMidiPlaybackPorts[port_index]) {
                 jack_port_unregister(fClient, fMidiPlaybackPorts[port_index]);
+                fMidiPlaybackPorts[port_index] = NULL;
             }
         }
     }
@@ -395,31 +418,38 @@ namespace Jack
         JackNetMaster* obj = static_cast<JackNetMaster*>(arg);
         jack_nframes_t port_latency = jack_get_buffer_size(obj->fClient);
         jack_latency_range_t range;
-        
+
+        // FreePorts() nulls each slot as it unregisters, and unregistering
+        // re-enters this callback mid-loop; a NULL slot means the port is
+        // already gone and must be skipped, not passed on.
+
         //audio
         for (int i = 0; i < obj->fParams.fSendAudioChannels; i++) {
+            if (!obj->fAudioCapturePorts[i]) continue;
             //port latency
             range.min = range.max = float(obj->fParams.fNetworkLatency * port_latency) / 2.f;
             jack_port_set_latency_range(obj->fAudioCapturePorts[i], JackPlaybackLatency, &range);
         }
-        
+
         //audio
         for (int i = 0; i < obj->fParams.fReturnAudioChannels; i++) {
+            if (!obj->fAudioPlaybackPorts[i]) continue;
             //port latency
             range.min = range.max = float(obj->fParams.fNetworkLatency * port_latency) / 2.f + ((obj->fParams.fSlaveSyncMode) ? 0 : port_latency);
             jack_port_set_latency_range(obj->fAudioPlaybackPorts[i], JackCaptureLatency, &range);
         }
-        
+
         //midi
         for (int i = 0; i < obj->fParams.fSendMidiChannels; i++) {
+            if (!obj->fMidiCapturePorts[i]) continue;
             //port latency
             range.min = range.max = float(obj->fParams.fNetworkLatency * port_latency) / 2.f;
             jack_port_set_latency_range(obj->fMidiCapturePorts[i], JackPlaybackLatency, &range);
         }
-    
+
         //midi
         for (int i = 0; i < obj->fParams.fReturnMidiChannels; i++) {
-            //port latency
+            if (!obj->fMidiPlaybackPorts[i]) continue;
             range.min = range.max = obj->fParams.fNetworkLatency * port_latency + ((obj->fParams.fSlaveSyncMode) ? 0 : port_latency);
             jack_port_set_latency_range(obj->fMidiPlaybackPorts[i], JackCaptureLatency, &range);
         }
@@ -883,28 +913,30 @@ namespace Jack
             return NULL;
         }
 
-        // Dedupe by slave name. A slave that restarts — or a rapid Ethernet
-        // Audio toggle on the pedal — sends a fresh SLAVE_AVAILABLE while its
-        // previous master may still be in the list. Without this, each
-        // announcement spawns another JACK client and the graph fills with
-        // pistomp-01, pistomp-02, ... all fighting for the same ports.
+        // Dedupe by slave name. A live master for a slave means every
+        // further SLAVE_AVAILABLE from that name is duplicate discovery
+        // traffic — the pi announces continuously (~1/s) on the discovery
+        // group, on both its wired and wifi paths (dual-homed is the
+        // deployment standard), including while a session is running and
+        // while one is being established.
         //
-        // ReapDeadMasters() ran at the top of this same Run() pass, so every
-        // master that has already declared itself dead (FatalRecvError) is
-        // gone by now. A name match here is therefore always a *live* master
-        // that we are deliberately superseding: the old link isn't reachable
-        // any more but hasn't timed out — commonly because the restarted slave
-        // is now feeding the old master its packets, so that master would
-        // never self-declare dead. Reaping by name is the only way out; the
-        // KILL_MASTER path can't help (one lost multicast packet) and upstream
-        // FindMaster only matches fID, which a re-announcing slave doesn't have.
-        for (master_list_it_t it = fMasterList.begin(); it != fMasterList.end(); ) {
+        // ReapDeadMasters() ran at the top of this same Run() pass, so a
+        // name match here is a *live* master, never a dead one. The two
+        // things that legitimately end a session — FatalRecvError/
+        // FatalSendError on the RT path, KILL_MASTER from the slave —
+        // remove the master before the next announce is processed. There
+        // is therefore no case where superseding from the announce path is
+        // required; every variant tried here (kill-on-announce, kill-if-not-
+        // yet-synched) turned into a livelock, because the slave's UDP
+        // socket stays connected to the killed master's port and answers
+        // every replacement's SETUP with ICMP port-unreachable until its
+        // own recv timeout (~10 s) restarts it — then the cycle repeats.
+        // Measured as hundreds of master recreations, a starved RT graph
+        // and no audio (docs/plan-replug-recovery.md, fault 2).
+        for (master_list_it_t it = fMasterList.begin(); it != fMasterList.end(); ++it) {
             if (strcmp((*it)->fParams.fName, params.fName) == 0) {
-                jack_info("NetMaster '%s' already present — superseding the live one", params.fName);
-                master_list_it_t stale = it++;
-                RemoveMaster(stale);
-            } else {
-                ++it;
+                jack_log("NetMaster '%s' already live; ignoring announce", params.fName);
+                return NULL;
             }
         }
 
