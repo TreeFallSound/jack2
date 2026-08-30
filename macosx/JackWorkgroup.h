@@ -66,8 +66,11 @@ int JackWorkgroupJoinSelfForDevice(uint32_t device_id);
 /*!
 \brief Leave the workgroup this thread joined, if any. Idempotent.
 
-Must run on the thread that joined. Membership also drops when the thread
-exits, so this is only needed for a clean teardown.
+Must run on the thread that joined, and must run before that thread ends.
+Membership does NOT drop by itself: a thread that ends while it is a member
+makes libdispatch raise EXC_BREAKPOINT in _os_workgroup_tsd_cleanup, which
+stops the process. JackPosixThread::ThreadHandler calls this from a
+cancellation handler for that reason.
 */
 void JackWorkgroupLeaveSelf(void);
 

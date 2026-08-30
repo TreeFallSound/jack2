@@ -25,6 +25,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 #include <string.h> // for memset
 #include <unistd.h> // for _POSIX_PRIORITY_SCHEDULING check
 
+
 //#define JACK_SCHED_POLICY SCHED_RR
 #define JACK_SCHED_POLICY SCHED_FIFO
 
@@ -34,6 +35,45 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 
 namespace Jack
 {
+
+static __thread void (*gThreadExitHook)(void) = NULL;
+
+SERVER_EXPORT void JackSetThreadExitHook(void (*hook)(void))
+{
+    gThreadExitHook = hook;
+}
+
+/*
+    Run the thread's exit hook before the thread ends.
+
+    On macOS JackClient::SetupRealTime joins the backend device's CoreAudio
+    workgroup on this thread and sets the hook to the matching leave. A thread
+    that ends while it is a member makes libdispatch stop the process:
+    _os_workgroup_tsd_cleanup raises EXC_BREAKPOINT during the pthread_exit of
+    that thread.
+
+    JackClient::SetupRealTime joins the backend device's workgroup on this
+    thread. A thread that ends while it is a member makes libdispatch stop the
+    process: _os_workgroup_tsd_cleanup raises EXC_BREAKPOINT during the
+    pthread_exit of that thread. The comment in JackWorkgroup.h that says
+    membership drops by itself at thread exit is wrong.
+
+    This is a cancellation handler because cancellation is how the thread
+    usually ends. JackEngine::ClientDeactivate cancels the client thread, the
+    cancel is taken at the condition wait in JackPosixProcessSync, and no
+    ordinary return path runs. A cable fault does exactly this to the netJACK2
+    master client, and jackd stopped with SIGTRAP on every cable fault.
+
+    Cancellation handlers run before the thread-specific-data destructors, thus
+    the membership is gone before libdispatch looks at it.
+*/
+static void JackThreadExitCleanup(void* /*arg*/)
+{
+    if (gThreadExitHook != NULL) {
+        gThreadExitHook();
+        gThreadExitHook = NULL;
+    }
+}
 
 void* JackPosixThread::ThreadHandler(void* arg)
 {
@@ -49,18 +89,39 @@ void* JackPosixThread::ThreadHandler(void* arg)
     jack_log("JackPosixThread::ThreadHandler : start");
     obj->fStatus = kIniting;
 
+    /*
+        Init joins the workgroup, thus the handler must cover Init as well as
+        the loop. pthread_cleanup_push and pthread_cleanup_pop are one lexical
+        block, and a return between them leaves a handler on a dead frame.
+        Thus the init failure exits after the pop, and init_ok is declared
+        before the push: the block ends at the pop.
+
+        The hook covers Init as well as the loop, because Init is where
+        JackClient::SetupRealTime joins the workgroup and sets the hook.
+    */
+    bool init_ok = false;
+
+    pthread_cleanup_push(JackThreadExitCleanup, NULL);
+
     // Call Init method
-    if (!runnable->Init()) {
+    init_ok = runnable->Init();
+
+    if (init_ok) {
+        obj->fStatus = kRunning;
+
+        // If Init succeed, start the thread loop
+        bool res = true;
+        while (obj->fStatus == kRunning && res) {
+            res = runnable->Execute();
+        }
+    } else {
         jack_error("Thread init fails: thread quits");
-        return 0;
     }
 
-    obj->fStatus = kRunning;
+    pthread_cleanup_pop(1);
 
-    // If Init succeed, start the thread loop
-    bool res = true;
-    while (obj->fStatus == kRunning && res) {
-        res = runnable->Execute();
+    if (!init_ok) {
+        return 0;
     }
 
     jack_log("JackPosixThread::ThreadHandler : exit");

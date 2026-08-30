@@ -31,6 +31,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 
 #ifdef __APPLE__
 #include "JackWorkgroup.h"
+#include "JackPosixThread.h"
 #include <stdlib.h>
 #endif
 
@@ -584,7 +585,14 @@ void JackClient::SetupRealTime()
         it already had, which is the pre-existing behaviour.
     */
     if (getenv("JACK_NO_WORKGROUP") == NULL) {
-        JackWorkgroupJoinSelfForDevice(GetEngineControl()->fCoreAudioDeviceID);
+        if (JackWorkgroupJoinSelfForDevice(GetEngineControl()->fCoreAudioDeviceID) == 0) {
+            /*
+                Leave the workgroup before this thread ends. This is not
+                optional tidiness: libdispatch stops the process when a thread
+                ends while it is a member. See JackPosixThread::ThreadHandler.
+            */
+            JackSetThreadExitHook(JackWorkgroupLeaveSelf);
+        }
     } else {
         jack_info("JackClient::SetupRealTime : JACK_NO_WORKGROUP set, staying out of the backend workgroup");
     }
