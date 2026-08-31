@@ -301,6 +301,14 @@ namespace Jack
         return 0;
     }
 
+    // No-op on Windows. fBoundIF stays 0 in the manager, so masters keep the
+    // legacy route-table egress.
+    int JackNetWinSocket::SetBoundIF(int ifindex) { (void)ifindex; return 0; }
+    int JackNetWinSocket::SetRecvIF() { return 0; }
+    int JackNetWinSocket::GetLastRecvIF() { return 0; }
+    int JackNetWinSocket::IFNameToIndex(const char* ifname) { (void)ifname; return 0; }
+    bool JackNetWinSocket::IFIndexValid(int ifindex) { (void)ifindex; return false; }
+
     //options************************************************************************************************************
     int JackNetWinSocket::SetOption(int level, int optname, const void* optval, SOCKLEN optlen)
     {

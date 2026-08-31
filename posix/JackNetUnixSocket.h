@@ -47,6 +47,26 @@ namespace Jack
 
             struct sockaddr_in fSendAddr;
             struct sockaddr_in fRecvAddr;
+
+            // Interface name to pin outgoing multicast to. Stored here rather
+            // than applied immediately: callers (JackNetAdapter) set it before
+            // the socket exists, so the old code did the setsockopt on fd 0 and
+            // never re-applied it. Empty = legacy behavior. Re-applied by every
+            // NewSocket().
+            char fMcastIF[16];
+            int ApplyMulticastIF();
+
+            // Interface index for unicast egress. 0 disables the pin.
+            // NewSocket() applies it. The copy constructor must copy it.
+            int fBoundIF;
+            int ApplyBoundIF();
+
+            // If true, CatchHost() uses recvmsg() and records the arrival
+            // interface index in fLastRecvIF. If false, CatchHost() uses
+            // recvfrom().
+            bool fRecvIF;
+            int fLastRecvIF;
+            int ApplyRecvIF();
         #if defined(__sun__) || defined(sun)
             int WaitRead();
             int WaitWrite();
@@ -100,6 +120,19 @@ namespace Jack
             // no-op so the legacy behavior (kernel chooses interface) is
             // preserved when the env var is unset.
             int SetMulticastIF(const char* ifname);
+
+            // Pin unicast egress (connect(), send()) to an interface index.
+            // Pass 0 to remove the pin. NewSocket() applies the pin.
+            int SetBoundIF(int ifindex);
+            // Make CatchHost() record the arrival interface index.
+            int SetRecvIF();
+            // Arrival interface index of the last CatchHost() datagram.
+            // 0 if not known.
+            int GetLastRecvIF();
+            // Interface index for the given name. 0 if the name is unknown.
+            int IFNameToIndex(const char* ifname);
+            // True if the interface index refers to a current interface.
+            bool IFIndexValid(int ifindex);
 
             //options management
             int SetOption(int level, int optname, const void* optval, socklen_t optlen);

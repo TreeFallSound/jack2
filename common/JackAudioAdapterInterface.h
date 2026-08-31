@@ -94,6 +94,10 @@ namespace Jack
 
         bool fRunning;
         bool fAdaptative;
+        uint64_t fFailureCount;
+        jack_time_t fLastFailureReport;
+
+        uint64_t FailureReportCount();
 
         void ResetRingBuffers();
         void AdaptRingBufferSize();
@@ -114,7 +118,9 @@ namespace Jack
                                 fRingbufferCurSize(ring_buffer_size),
                                 fPullAndPushTime(0),
                                 fRunning(false),
-                                fAdaptative(true)
+                                fAdaptative(true),
+                                fFailureCount(0),
+                                fLastFailureReport(0)
         {}
 
         JackAudioAdapterInterface(jack_nframes_t host_buffer_size,
@@ -133,7 +139,9 @@ namespace Jack
                                 fRingbufferCurSize(ring_buffer_size),
                                 fPullAndPushTime(0),
                                 fRunning(false),
-                                fAdaptative(true)
+                                fAdaptative(true),
+                                fFailureCount(0),
+                                fLastFailureReport(0)
         {}
 
         virtual ~JackAudioAdapterInterface()

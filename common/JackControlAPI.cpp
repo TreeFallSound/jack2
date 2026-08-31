@@ -698,6 +698,19 @@ jackctl_wait_signals(jackctl_sigmask_t * sigmask)
                 // driver exit
                 waiting = false;
                 break;
+            case SIGPIPE:
+                /*
+                    A write to a peer that went away. Not a reason to stop the
+                    server. The signal stays blocked in every thread, thus the
+                    write returns EPIPE and the caller handles it: netJACK2
+                    logs "connection lost" and drops that master. Before this,
+                    a cable fault reached the default case and stopped jackd,
+                    which then hung in ClientDeactivate for the client that had
+                    just lost its peer.
+                */
+                jack_info("Jack main ignores SIGPIPE from a lost peer");
+                break;
+
             case SIGTTOU:
                 break;
             default:

@@ -22,6 +22,7 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 
 #include "JackNetTool.h"
 #include <limits.h>
+#include <atomic>
 
 namespace Jack
 {
@@ -156,7 +157,17 @@ namespace Jack
             bool fRunning;
             int fCurrentCycleOffset;
             int fMaxCycleOffset;
-            bool fSynched;
+            // Written on the RT thread when the sync offset is reached,
+            // read on the manager thread by IsSynched() (supersede guard).
+            // Atomic for the same reason fDead is: cross-thread access.
+            std::atomic<bool> fSynched;
+            // Raised by FatalRecvError / FatalSendError on the RT process
+            // thread. The manager thread polls IsDead() and reaps the master
+            // off the RT thread — the old code called ThreadExit() from inside
+            // the process callback, leaving the JACK client registered with a
+            // dead RT thread, which made every subsequent audio cycle wait out
+            // the full PACKET_TIMEOUT. See NETJACK-REAPING.md.
+            std::atomic<bool> fDead;
 
             bool Init();
             bool SetParams();
@@ -183,21 +194,33 @@ namespace Jack
 
             JackNetMasterInterface() 
                 : JackNetInterface(), 
-                fRunning(false), 
-                fCurrentCycleOffset(0), 
-                fMaxCycleOffset(0), 
-                fSynched(false)
+                fRunning(false),
+                fCurrentCycleOffset(0),
+                fMaxCycleOffset(0),
+                fSynched(false),
+                fDead(false)
             {}
             JackNetMasterInterface(session_params_t& params, JackNetSocket& socket, const char* multicast_ip)
-                    : JackNetInterface(params, socket, multicast_ip), 
-                    fRunning(false), 
-                    fCurrentCycleOffset(0), 
-                    fMaxCycleOffset(0), 
-                    fSynched(false)
+                    : JackNetInterface(params, socket, multicast_ip),
+                    fRunning(false),
+                    fCurrentCycleOffset(0),
+                    fMaxCycleOffset(0),
+                    fSynched(false),
+                    fDead(false)
             {}
 
             virtual~JackNetMasterInterface()
             {}
+
+            // True once a fatal socket error has torn the link down. Polled by
+            // JackNetMasterManager to reap the master off the RT thread.
+            bool IsDead() const { return fDead.load(std::memory_order_acquire); }
+            // True once the sync exchange with this slave completed and the
+            // RT cycle offset reached fMaxCycleOffset — i.e. the session is
+            // exchanging packets, not merely registered. InitMaster uses this
+            // to decide whether an incoming announce is duplicate discovery
+            // traffic (ignore) or a new incarnation (supersede).
+            bool IsSynched() const { return fSynched.load(std::memory_order_acquire); }
     };
 
     /**

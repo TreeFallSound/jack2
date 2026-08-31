@@ -283,9 +283,11 @@ namespace Jack
                 }
             }
         }
-        // Reset all ringbuffers in case of failure
         if (failure) {
-            jack_error("JackAudioAdapterInterface::PushAndPull ringbuffer failure... reset");
+            uint64_t failure_count = FailureReportCount();
+            if (failure_count > 0) {
+                jack_error("JackAudioAdapterInterface::PushAndPull ringbuffer failure... reset; failures since last report = %llu", (unsigned long long)failure_count);
+            }
             if (fAdaptative) {
                 GrowRingBufferSize();
                 jack_info("Ringbuffer size = %d frames", fRingbufferCurSize);
@@ -297,9 +299,21 @@ namespace Jack
         }
     }
 
+    uint64_t JackAudioAdapterInterface::FailureReportCount()
+    {
+        ++fFailureCount;
+        jack_time_t now = GetMicroSeconds();
+        if (fLastFailureReport != 0 && now - fLastFailureReport < 1000000) {
+            return 0;
+        }
+        fLastFailureReport = now;
+        uint64_t count = fFailureCount;
+        fFailureCount = 0;
+        return count;
+    }
+
     int JackAudioAdapterInterface::PullAndPush(float** inputBuffer, float** outputBuffer, unsigned int frames)
     {
-        fPullAndPushTime = GetMicroSeconds();
         if (!fRunning) {
             return 0;
         }

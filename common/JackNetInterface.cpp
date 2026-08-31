@@ -415,22 +415,25 @@ namespace Jack
 
     void JackNetMasterInterface::FatalRecvError()
     {
-        // fatal connection issue, exit
+        // fatal connection issue
         jack_error("Recv connection lost error = %s, '%s' exiting", StrError(NET_ERROR_CODE), fParams.fName);
-        // ask to the manager to properly remove the master
+        // stop the process loop and send the multicast euthanasia request
         Exit();
-        // UGLY temporary way to be sure the thread does not call code possibly causing a deadlock in JackEngine.
-        ThreadExit();
+        // Flag for the manager thread to reap. Do NOT ThreadExit() here: this
+        // runs as the JACK process callback on the RT graph thread, and killing
+        // that thread leaves the client registered with nothing to service it —
+        // every following audio cycle then waits out the full PACKET_TIMEOUT.
+        // The manager polls IsDead() and destroys the master off the RT thread.
+        fDead.store(true, std::memory_order_release);
     }
 
      void JackNetMasterInterface::FatalSendError()
     {
-        // fatal connection issue, exit
+        // fatal connection issue
         jack_error("Send connection lost error = %s, '%s' exiting", StrError(NET_ERROR_CODE), fParams.fName);
-        // ask to the manager to properly remove the master
         Exit();
-        // UGLY temporary way to be sure the thread does not call code possibly causing a deadlock in JackEngine.
-        ThreadExit();
+        // See FatalRecvError: reap from the manager thread, never ThreadExit() here.
+        fDead.store(true, std::memory_order_release);
     }
 
     int JackNetMasterInterface::Recv(size_t size, int flags)

@@ -112,12 +112,24 @@ namespace Jack
         //network init
         if (!JackNetMasterInterface::Init()) {
             jack_error("JackNetMasterInterface::Init() error...");
+            // Close the failed socket now, not at destruction. A failed
+            // handshake (typically ECONNREFUSED from the slave's previous
+            // incarnation, whose connected peer no longer has a listener)
+            // leaves the socket wedged with a queued ICMP error. The manager
+            // retries on the slave's next announce; releasing the fd here
+            // guarantees that retry builds on clean kernel state instead of
+            // inheriting the error queue (docs/plan-replug-recovery.md,
+            // Correction 2b: "must not continue with a socket that does not
+            // operate").
+            fSocket.Close();
             return false;
         }
 
         //set global parameters
         if (!SetParams()) {
             jack_error("SetParams error...");
+            // Same discipline: release the socket before the manager retries.
+            fSocket.Close();
             return false;
         }
 
@@ -239,25 +251,36 @@ namespace Jack
     {
         jack_log("JackNetMaster::FreePorts ID = %u", fParams.fID);
 
+        // Null each slot as its port is unregistered. jack_port_unregister
+        // triggers a graph latency recomputation, which re-enters our
+        // LatencyCallback mid-loop; if the array kept the stale pointer,
+        // that callback fed it to jack_port_set_latency_range and jackd
+        // logged "called with an incorrect port <garbage>" — a use-after-
+        // free visible on every master teardown (docs/plan-replug-recovery.md,
+        // "Also seen"). LatencyCallback skips NULL slots for the same reason.
         int port_index;
         for (port_index = 0; port_index < fParams.fSendAudioChannels; port_index++) {
             if (fAudioCapturePorts[port_index]) {
                 jack_port_unregister(fClient, fAudioCapturePorts[port_index]);
+                fAudioCapturePorts[port_index] = NULL;
             }
         }
         for (port_index = 0; port_index < fParams.fReturnAudioChannels; port_index++) {
             if (fAudioPlaybackPorts[port_index]) {
                 jack_port_unregister(fClient, fAudioPlaybackPorts[port_index]);
+                fAudioPlaybackPorts[port_index] = NULL;
             }
         }
         for (port_index = 0; port_index < fParams.fSendMidiChannels; port_index++) {
             if (fMidiCapturePorts[port_index]) {
                 jack_port_unregister(fClient, fMidiCapturePorts[port_index]);
+                fMidiCapturePorts[port_index] = NULL;
             }
         }
         for (port_index = 0; port_index < fParams.fReturnMidiChannels; port_index++) {
             if (fMidiPlaybackPorts[port_index]) {
                 jack_port_unregister(fClient, fMidiPlaybackPorts[port_index]);
+                fMidiPlaybackPorts[port_index] = NULL;
             }
         }
     }
@@ -395,31 +418,38 @@ namespace Jack
         JackNetMaster* obj = static_cast<JackNetMaster*>(arg);
         jack_nframes_t port_latency = jack_get_buffer_size(obj->fClient);
         jack_latency_range_t range;
-        
+
+        // FreePorts() nulls each slot as it unregisters, and unregistering
+        // re-enters this callback mid-loop; a NULL slot means the port is
+        // already gone and must be skipped, not passed on.
+
         //audio
         for (int i = 0; i < obj->fParams.fSendAudioChannels; i++) {
+            if (!obj->fAudioCapturePorts[i]) continue;
             //port latency
             range.min = range.max = float(obj->fParams.fNetworkLatency * port_latency) / 2.f;
             jack_port_set_latency_range(obj->fAudioCapturePorts[i], JackPlaybackLatency, &range);
         }
-        
+
         //audio
         for (int i = 0; i < obj->fParams.fReturnAudioChannels; i++) {
+            if (!obj->fAudioPlaybackPorts[i]) continue;
             //port latency
             range.min = range.max = float(obj->fParams.fNetworkLatency * port_latency) / 2.f + ((obj->fParams.fSlaveSyncMode) ? 0 : port_latency);
             jack_port_set_latency_range(obj->fAudioPlaybackPorts[i], JackCaptureLatency, &range);
         }
-        
+
         //midi
         for (int i = 0; i < obj->fParams.fSendMidiChannels; i++) {
+            if (!obj->fMidiCapturePorts[i]) continue;
             //port latency
             range.min = range.max = float(obj->fParams.fNetworkLatency * port_latency) / 2.f;
             jack_port_set_latency_range(obj->fMidiCapturePorts[i], JackPlaybackLatency, &range);
         }
-    
+
         //midi
         for (int i = 0; i < obj->fParams.fReturnMidiChannels; i++) {
-            //port latency
+            if (!obj->fMidiPlaybackPorts[i]) continue;
             range.min = range.max = obj->fParams.fNetworkLatency * port_latency + ((obj->fParams.fSlaveSyncMode) ? 0 : port_latency);
             jack_port_set_latency_range(obj->fMidiPlaybackPorts[i], JackCaptureLatency, &range);
         }
@@ -448,14 +478,81 @@ namespace Jack
         }
     }
 
+    void JackNetMaster::RecordDiagnosticStage(uint64_t& max_usecs,
+                                               jack_time_t start,
+                                               jack_time_t end)
+    {
+        const uint64_t elapsed = (end >= start) ? (end - start) : 0;
+        if (elapsed > max_usecs) max_usecs = elapsed;
+    }
+
+    void JackNetMaster::FinishDiagnosticCycle(jack_time_t start, jack_time_t end)
+    {
+        const uint64_t elapsed = (end >= start) ? (end - start) : 0;
+        if (elapsed > fDiagMaxProcessUsecs) fDiagMaxProcessUsecs = elapsed;
+
+        const uint64_t period_usecs = fParams.fSampleRate
+            ? (1000000ULL * fParams.fPeriodSize / fParams.fSampleRate)
+            : 0;
+        if (period_usecs && elapsed > period_usecs) ++fDiagSlowCycles;
+
+        ReportDiagnosticsIfDue(end);
+    }
+
+    void JackNetMaster::ReportDiagnosticsIfDue(jack_time_t now)
+    {
+        static const jack_time_t kReportIntervalUsecs = 5000000;
+        if (fDiagLastReportUsecs == 0) {
+            fDiagLastReportUsecs = now;
+            return;
+        }
+        if (now - fDiagLastReportUsecs < kReportIntervalUsecs) return;
+
+        // This is intentionally one interval summary, not a per-packet log.
+        // The counters are written by this JACK process callback only; keeping
+        // the report here avoids locks or cross-thread reads in the RT path.
+        jack_info("NetMaster diagnostics slave=%s cycles=%llu "
+                  "dataPacketErrors=%llu syncPacketErrors=%llu "
+                  "socketErrors=%llu slowCycles=%llu "
+                  "maxProcessUsecs=%llu maxSyncSendUsecs=%llu "
+                  "maxDataSendUsecs=%llu maxSyncRecvUsecs=%llu "
+                  "maxDataRecvUsecs=%llu",
+                  fParams.fName,
+                  (unsigned long long)fDiagCycles,
+                  (unsigned long long)fDiagDataPacketErrors,
+                  (unsigned long long)fDiagSyncPacketErrors,
+                  (unsigned long long)fDiagSocketErrors,
+                  (unsigned long long)fDiagSlowCycles,
+                  (unsigned long long)fDiagMaxProcessUsecs,
+                  (unsigned long long)fDiagMaxSyncSendUsecs,
+                  (unsigned long long)fDiagMaxDataSendUsecs,
+                  (unsigned long long)fDiagMaxSyncRecvUsecs,
+                  (unsigned long long)fDiagMaxDataRecvUsecs);
+
+        fDiagCycles = 0;
+        fDiagDataPacketErrors = 0;
+        fDiagSyncPacketErrors = 0;
+        fDiagSocketErrors = 0;
+        fDiagSlowCycles = 0;
+        fDiagMaxProcessUsecs = 0;
+        fDiagMaxSyncSendUsecs = 0;
+        fDiagMaxDataSendUsecs = 0;
+        fDiagMaxSyncRecvUsecs = 0;
+        fDiagMaxDataRecvUsecs = 0;
+        fDiagLastReportUsecs = now;
+    }
+
     int JackNetMaster::Process()
     {
         if (!fRunning) {
             return 0;
         }
 
+        const jack_time_t process_start = GetMicroSeconds();
+        ++fDiagCycles;
+
 #ifdef JACK_MONITOR
-        jack_time_t begin_time = GetMicroSeconds();
+        jack_time_t begin_time = process_start;
         fNetTimeMon->New();
 #endif
 
@@ -512,35 +609,56 @@ namespace Jack
         // encode the first packet
         EncodeSyncPacket();
 
-        if (SyncSend() == SOCKET_ERROR) {
-            return SOCKET_ERROR;
+        jack_time_t stage_start = GetMicroSeconds();
+        int result = SyncSend();
+        jack_time_t stage_end = GetMicroSeconds();
+        RecordDiagnosticStage(fDiagMaxSyncSendUsecs, stage_start, stage_end);
+        if (result == SOCKET_ERROR) {
+            ++fDiagSocketErrors;
+            FinishDiagnosticCycle(process_start, stage_end);
+            return result;
         }
 
 #ifdef JACK_MONITOR
-        fNetTimeMon->Add((((float)(GetMicroSeconds() - begin_time)) / (float) fPeriodUsecs) * 100.f);
+        fNetTimeMon->Add((((float)(stage_end - begin_time)) / (float) fPeriodUsecs) * 100.f);
 #endif
 
         // send data
-        if (DataSend() == SOCKET_ERROR) {
-            return SOCKET_ERROR;
+        stage_start = GetMicroSeconds();
+        result = DataSend();
+        stage_end = GetMicroSeconds();
+        RecordDiagnosticStage(fDiagMaxDataSendUsecs, stage_start, stage_end);
+        if (result == SOCKET_ERROR) {
+            ++fDiagSocketErrors;
+            FinishDiagnosticCycle(process_start, stage_end);
+            return result;
         }
 
 #ifdef JACK_MONITOR
-        fNetTimeMon->Add((((float)(GetMicroSeconds() - begin_time)) / (float) fPeriodUsecs) * 100.f);
+        fNetTimeMon->Add((((float)(stage_end - begin_time)) / (float) fPeriodUsecs) * 100.f);
 #endif
 
         // receive sync
-        int res = SyncRecv();
-        switch (res) {
-        
+        stage_start = GetMicroSeconds();
+        result = SyncRecv();
+        stage_end = GetMicroSeconds();
+        RecordDiagnosticStage(fDiagMaxSyncRecvUsecs, stage_start, stage_end);
+        switch (result) {
+
             case NET_SYNCHING:
+                FinishDiagnosticCycle(process_start, stage_end);
+                return result;
+
             case SOCKET_ERROR:
-                return res;
-                
+                ++fDiagSocketErrors;
+                FinishDiagnosticCycle(process_start, stage_end);
+                return result;
+
             case SYNC_PACKET_ERROR:
+                 ++fDiagSyncPacketErrors;
                  // Since sync packet is incorrect, don't decode it and continue with data
                  break;
-                
+
             default:
                 // Decode sync
                 int unused_frames;
@@ -549,26 +667,35 @@ namespace Jack
         }
 
 #ifdef JACK_MONITOR
-        fNetTimeMon->Add((((float)(GetMicroSeconds() - begin_time)) / (float) fPeriodUsecs) * 100.f);
+        fNetTimeMon->Add((((float)(stage_end - begin_time)) / (float) fPeriodUsecs) * 100.f);
 #endif
-      
+
         // receive data
-        res = DataRecv();
-        switch (res) {
-        
+        stage_start = GetMicroSeconds();
+        result = DataRecv();
+        stage_end = GetMicroSeconds();
+        RecordDiagnosticStage(fDiagMaxDataRecvUsecs, stage_start, stage_end);
+        switch (result) {
+
             case 0:
+                break;
+
             case SOCKET_ERROR:
-                return res;
-                
+                ++fDiagSocketErrors;
+                FinishDiagnosticCycle(process_start, stage_end);
+                return result;
+
             case DATA_PACKET_ERROR:
+                ++fDiagDataPacketErrors;
                 // Well not a real XRun...
                 JackServerGlobals::fInstance->GetEngine()->NotifyClientXRun(ALL_CLIENTS);
                 break;
         }
 
 #ifdef JACK_MONITOR
-        fNetTimeMon->AddLast((((float)(GetMicroSeconds() - begin_time)) / (float) fPeriodUsecs) * 100.f);
+        fNetTimeMon->AddLast((((float)(stage_end - begin_time)) / (float) fPeriodUsecs) * 100.f);
 #endif
+        FinishDiagnosticCycle(process_start, stage_end);
         return 0;
     }
     
@@ -667,9 +794,12 @@ namespace Jack
         // wrong one. Empty/unset keeps the legacy INADDR_ANY behavior.
         const char* multicast_if = getenv("JACK_NETJACK_MULTICAST_IF");
         fMulticastIF[0] = '\0';
+        fBoundIF = 0;
+        fPinFromEnv = false;
         if (multicast_if) {
             strncpy(fMulticastIF, multicast_if, sizeof(fMulticastIF) - 1);
             fMulticastIF[sizeof(fMulticastIF) - 1] = '\0';
+            fPinFromEnv = true;
         }
 
         for (node = params; node; node = jack_slist_next(node)) {
@@ -818,6 +948,9 @@ namespace Jack
             jack_error("Can't set local loop : %s", StrError(NET_ERROR_CODE));
         }
 
+        //record the arrival interface of each announce (for master egress pin)
+        fSocket.SetRecvIF();
+
         //set a timeout on the multicast receive (the thread can now be cancelled)
         if (fSocket.SetTimeOut(MANAGER_INIT_TIMEOUT) == SOCKET_ERROR) {
             jack_error("Can't set timeout : %s", StrError(NET_ERROR_CODE));
@@ -826,6 +959,11 @@ namespace Jack
         //main loop, wait for data, deal with it and wait again
         do
         {
+            // Reap masters whose RT link died since the last pass. The recv
+            // below has a MANAGER_INIT_TIMEOUT, so this runs at least every 2 s
+            // even when the network is silent.
+            ReapDeadMasters();
+
             session_params_t net_params;
             rx_bytes = fSocket.CatchHost(&net_params, sizeof(session_params_t), 0);
             SessionParamsNToH(&net_params, &host_params);
@@ -872,6 +1010,33 @@ namespace Jack
             return NULL;
         }
 
+        // Dedupe by slave name. A live master for a slave means every
+        // further SLAVE_AVAILABLE from that name is duplicate discovery
+        // traffic — the pi announces continuously (~1/s) on the discovery
+        // group, on both its wired and wifi paths (dual-homed is the
+        // deployment standard), including while a session is running and
+        // while one is being established.
+        //
+        // ReapDeadMasters() ran at the top of this same Run() pass, so a
+        // name match here is a *live* master, never a dead one. The two
+        // things that legitimately end a session — FatalRecvError/
+        // FatalSendError on the RT path, KILL_MASTER from the slave —
+        // remove the master before the next announce is processed. There
+        // is therefore no case where superseding from the announce path is
+        // required; every variant tried here (kill-on-announce, kill-if-not-
+        // yet-synched) turned into a livelock, because the slave's UDP
+        // socket stays connected to the killed master's port and answers
+        // every replacement's SETUP with ICMP port-unreachable until its
+        // own recv timeout (~10 s) restarts it — then the cycle repeats.
+        // Measured as hundreds of master recreations, a starved RT graph
+        // and no audio (docs/plan-replug-recovery.md, fault 2).
+        for (master_list_it_t it = fMasterList.begin(); it != fMasterList.end(); ++it) {
+            if (strcmp((*it)->fParams.fName, params.fName) == 0) {
+                jack_log("NetMaster '%s' already live; ignoring announce", params.fName);
+                return NULL;
+            }
+        }
+
         //settings
         fSocket.GetName(params.fMasterNetName);
         params.fID = ++fGlobalID;
@@ -897,6 +1062,31 @@ namespace Jack
             params.fReturnMidiChannels = CountIO(JACK_DEFAULT_MIDI_TYPE, JackPortIsPhysical | JackPortIsInput);
             jack_info("Takes physical %d MIDI output(s) for slave", params.fReturnMidiChannels);
         }
+
+        // Pin the master's command and RT sockets to one interface. A host
+        // with a link-local address on both a direct cable and wifi has two
+        // routes to the slave; without a pin the master's reply can leave by
+        // the wrong one. Use the interface this announce arrived on, latched
+        // once and then kept (see fBoundIF). fSocket is copied into the
+        // master below, so SetBoundIF must run before the copy.
+        int pin_if = 0;
+        if (fPinFromEnv) {
+            pin_if = fSocket.IFNameToIndex(fMulticastIF);
+            if (pin_if == 0) {
+                jack_error("netJACK: interface '%s' not found; master egress not pinned", fMulticastIF);
+            }
+        } else {
+            if (fBoundIF != 0 && !fSocket.IFIndexValid(fBoundIF)) {
+                jack_info("netJACK: pinned interface (ifindex %d) is gone; re-latching", fBoundIF);
+                fBoundIF = 0;
+            }
+            if (fBoundIF == 0 && fSocket.GetLastRecvIF() != 0) {
+                fBoundIF = fSocket.GetLastRecvIF();
+                jack_info("netJACK: pinning masters to ifindex %d", fBoundIF);
+            }
+            pin_if = fBoundIF;
+        }
+        fSocket.SetBoundIF(pin_if);
 
         //create a new master and add it to the list
         JackNetMaster* master = new JackNetMaster(fSocket, params, fMulticastIP);
@@ -925,21 +1115,51 @@ namespace Jack
         return it;
     }
 
+    // Remove one master from the list and destroy it. Caller holds no lock —
+    // the manager is single-threaded apart from the RT process callbacks, and
+    // those never touch fMasterList.
+    void JackNetMasterManager::RemoveMaster(master_list_it_t master_it)
+    {
+        JackNetMaster* master = *master_it;
+        if (fAutoSave) {
+            fMasterConnectionList[master->fParams.fName].clear();
+            master->SaveConnections(fMasterConnectionList[master->fParams.fName]);
+        }
+        // Capture the pointer BEFORE erasing: erase() invalidates the iterator,
+        // so the old "erase(it); delete (*it);" was a use-after-free that
+        // deleted whatever garbage the stale iterator dereferenced to.
+        fMasterList.erase(master_it);
+        delete master;
+    }
+
     int JackNetMasterManager::KillMaster(session_params_t* params)
     {
         jack_log("JackNetMasterManager::KillMaster ID = %u", params->fID);
 
         master_list_it_t master_it = FindMaster(params->fID);
         if (master_it != fMasterList.end()) {
-            if (fAutoSave) {
-                fMasterConnectionList[params->fName].clear();
-                (*master_it)->SaveConnections(fMasterConnectionList[params->fName]);
-            }
-            fMasterList.erase(master_it);
-            delete (*master_it);
+            RemoveMaster(master_it);
             return 1;
         }
         return 0;
+    }
+
+    // Reap any master whose RT link has died (FatalRecvError / FatalSendError).
+    // Called from the manager listener loop, i.e. off the RT thread. This is
+    // the path that recovers a yanked cable or a hard-killed slave, where the
+    // multicast KILL_MASTER packet never arrives.
+    void JackNetMasterManager::ReapDeadMasters()
+    {
+        master_list_it_t it = fMasterList.begin();
+        while (it != fMasterList.end()) {
+            if ((*it)->IsDead()) {
+                jack_info("Reaping dead NetMaster '%s' (ID %u)", (*it)->fParams.fName, (*it)->fParams.fID);
+                master_list_it_t dead = it++;
+                RemoveMaster(dead);
+            } else {
+                ++it;
+            }
+        }
     }
 }//namespace
 

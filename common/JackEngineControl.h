@@ -88,6 +88,13 @@ struct SERVER_EXPORT JackEngineControl : public JackShmMem
     // Timer
     alignas(UInt32) alignas(JackFrameTimer) JackFrameTimer fFrameTimer;
 
+    // AudioDeviceID of the backend's CoreAudio device, or 0 when the backend
+    // is not coreaudio (or has not opened yet). Published by
+    // JackCoreAudioDriver::Open so that client processes -- which never see
+    // the driver object -- can look up that device's os_workgroup and join it
+    // from their realtime threads.
+    UInt32 fCoreAudioDeviceID;
+
 #ifdef JACK_MONITOR
     JackEngineProfiling fProfiler;
 #endif
@@ -131,6 +138,7 @@ struct SERVER_EXPORT JackEngineControl : public JackShmMem
         fXrunDelayedUsecs = 0.f;
         fClockSource = clock;
         fDriverNum = 0;
+        fCoreAudioDeviceID = 0;
     }
 
     ~JackEngineControl()

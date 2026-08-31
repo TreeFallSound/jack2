@@ -138,6 +138,7 @@ def build(bld):
             '../macosx/JackMachThread.mm',
             '../macosx/JackMachSemaphore.mm',
             '../macosx/JackMachSemaphoreServer.mm',
+            '../macosx/JackWorkgroup.mm',
             '../posix/JackSocket.cpp',
             '../macosx/JackMachTime.c',
             ]
@@ -166,6 +167,10 @@ def build(bld):
     clientlib = bld(features=['c', 'cxx', 'cxxshlib', 'cshlib'])
     if bld.env['IS_MACOSX']:
         clientlib.framework = ['CoreAudio', 'Accelerate']
+        # JackWorkgroup.mm calls os_release on an os_workgroup_t, which is an
+        # os_object and lowers to objc_release. The other .mm files here never
+        # touch the ObjC runtime, so libobjc was not linked before.
+        clientlib.env.append_value('LINKFLAGS', ['-lobjc'])
     clientlib.defines = 'HAVE_CONFIG_H'
     clientlib.includes = includes
     clientlib.name = 'clientlib'
@@ -250,6 +255,8 @@ def build(bld):
     serverlib = bld(features=['c', 'cxx', 'cxxshlib', 'cshlib'])
     if bld.env['IS_MACOSX']:
         serverlib.framework = ['CoreAudio', 'CoreFoundation', 'Accelerate']
+        # See the clientlib note: JackWorkgroup.mm needs the ObjC runtime.
+        serverlib.env.append_value('LINKFLAGS', ['-lobjc'])
     serverlib.defines = ['HAVE_CONFIG_H', 'SERVER_SIDE']
     serverlib.includes = includes
     serverlib.name = 'serverlib'

@@ -85,13 +85,8 @@ unsigned int JackLibSampleRateResampler::ReadResample(jack_default_audio_sample_
     int res;
 
     jack_ringbuffer_get_read_vector(fRingBuffer, ring_buffer_data);
-    unsigned int available_frames = (ring_buffer_data[0].len + ring_buffer_data[1].len) / sizeof(jack_default_audio_sample_t);
-    jack_log("Output available = %ld", available_frames);
-
     for (int j = 0; j < 2; j++) {
-
         if (ring_buffer_data[j].len > 0) {
-
             src_data.data_in = (jack_default_audio_sample_t*)ring_buffer_data[j].buf;
             src_data.data_out = &buffer[written_frames];
             src_data.input_frames = ring_buffer_data[j].len / sizeof(jack_default_audio_sample_t);
@@ -101,26 +96,13 @@ unsigned int JackLibSampleRateResampler::ReadResample(jack_default_audio_sample_
 
             res = src_process(fResampler, &src_data);
             if (res != 0) {
-                jack_error("JackLibSampleRateResampler::ReadResample ratio = %f err = %s", fRatio, src_strerror(res));
                 return 0;
             }
 
             frames_to_write -= src_data.output_frames_gen;
             written_frames += src_data.output_frames_gen;
-
-            if ((src_data.input_frames_used == 0 || src_data.output_frames_gen == 0) && j == 0) {
-                jack_log("Output : j = %d input_frames_used = %ld output_frames_gen = %ld frames1 = %lu frames2 = %lu"
-                    , j, src_data.input_frames_used, src_data.output_frames_gen, ring_buffer_data[0].len, ring_buffer_data[1].len);
-            }
-
-            jack_log("Output : j = %d input_frames_used = %ld output_frames_gen = %ld", j, src_data.input_frames_used, src_data.output_frames_gen);
             jack_ringbuffer_read_advance(fRingBuffer, src_data.input_frames_used * sizeof(jack_default_audio_sample_t));
         }
-    }
-
-    if (written_frames < frames) {
-        jack_error("Output available = %ld", available_frames);
-        jack_error("JackLibSampleRateResampler::ReadResample error written_frames = %ld", written_frames);
     }
 
     return written_frames;
@@ -135,13 +117,8 @@ unsigned int JackLibSampleRateResampler::WriteResample(jack_default_audio_sample
     int res;
 
     jack_ringbuffer_get_write_vector(fRingBuffer, ring_buffer_data);
-    unsigned int available_frames = (ring_buffer_data[0].len + ring_buffer_data[1].len) / sizeof(jack_default_audio_sample_t);
-    jack_log("Input available = %ld", available_frames);
-
     for (int j = 0; j < 2; j++) {
-
         if (ring_buffer_data[j].len > 0) {
-
             src_data.data_in = &buffer[read_frames];
             src_data.data_out = (jack_default_audio_sample_t*)ring_buffer_data[j].buf;
             src_data.input_frames = frames_to_read;
@@ -151,26 +128,13 @@ unsigned int JackLibSampleRateResampler::WriteResample(jack_default_audio_sample
 
             res = src_process(fResampler, &src_data);
             if (res != 0) {
-                jack_error("JackLibSampleRateResampler::WriteResample ratio = %f err = %s", fRatio, src_strerror(res));
                 return 0;
             }
 
             frames_to_read -= src_data.input_frames_used;
             read_frames += src_data.input_frames_used;
-
-            if ((src_data.input_frames_used == 0 || src_data.output_frames_gen == 0) && j == 0) {
-                jack_log("Input : j = %d input_frames_used = %ld output_frames_gen = %ld frames1 = %lu frames2 = %lu"
-                    , j, src_data.input_frames_used, src_data.output_frames_gen, ring_buffer_data[0].len, ring_buffer_data[1].len);
-            }
-
-            jack_log("Input : j = %d input_frames_used = %ld output_frames_gen = %ld", j, src_data.input_frames_used, src_data.output_frames_gen);
             jack_ringbuffer_write_advance(fRingBuffer, src_data.output_frames_gen * sizeof(jack_default_audio_sample_t));
         }
-    }
-
-    if (read_frames < frames) {
-        jack_error("Input available = %ld", available_frames);
-        jack_error("JackLibSampleRateResampler::WriteResample error read_frames = %ld", read_frames);
     }
 
     return read_frames;

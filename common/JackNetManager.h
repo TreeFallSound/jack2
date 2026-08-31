@@ -61,6 +61,27 @@ namespace Jack
             //sync and transport
             int fLastTransportState;
 
+            // Five-second, interval-based diagnostics. These fields are written
+            // only by the JACK process callback; reporting is deliberately
+            // rate-limited so the normal cycle does not emit per-packet logs.
+            uint64_t fDiagCycles = 0;
+            uint64_t fDiagDataPacketErrors = 0;
+            uint64_t fDiagSyncPacketErrors = 0;
+            uint64_t fDiagSocketErrors = 0;
+            uint64_t fDiagSlowCycles = 0;
+            uint64_t fDiagMaxProcessUsecs = 0;
+            uint64_t fDiagMaxSyncSendUsecs = 0;
+            uint64_t fDiagMaxDataSendUsecs = 0;
+            uint64_t fDiagMaxSyncRecvUsecs = 0;
+            uint64_t fDiagMaxDataRecvUsecs = 0;
+            jack_time_t fDiagLastReportUsecs = 0;
+
+            void RecordDiagnosticStage(uint64_t& max_usecs,
+                                        jack_time_t start,
+                                        jack_time_t end);
+            void FinishDiagnosticCycle(jack_time_t start, jack_time_t end);
+            void ReportDiagnosticsIfDue(jack_time_t now);
+
             //monitoring
 #ifdef JACK_MONITOR
             jack_time_t fPeriodUsecs;
@@ -116,6 +137,14 @@ namespace Jack
             // Set from JACK_NETJACK_MULTICAST_IF. Empty = legacy INADDR_ANY
             // behavior. See posix/JackNetUnixSocket.cpp::JoinMCastGroup.
             char fMulticastIF[16];
+            // Interface index that master sockets pin unicast egress to.
+            // InitMaster() latches the first SLAVE_AVAILABLE arrival interface
+            // and keeps it. Do not re-latch on later packets: a stray announce
+            // on another interface must not move live masters.
+            int fBoundIF;
+            // True when JACK_NETJACK_MULTICAST_IF sets the pin. Then fBoundIF
+            // comes from fMulticastIF on each InitMaster() and no latch runs.
+            bool fPinFromEnv;
             JackNetSocket fSocket;
             jack_native_thread_t fThread;
             master_list_t fMasterList;
@@ -128,6 +157,8 @@ namespace Jack
             void Run();
             JackNetMaster* InitMaster(session_params_t& params);
             master_list_it_t FindMaster(uint32_t client_id);
+            void RemoveMaster(master_list_it_t master_it);
+            void ReapDeadMasters();
             int KillMaster(session_params_t* params);
             int SyncCallback(jack_transport_state_t state, jack_position_t* pos);
             int CountIO(const char* type, int flags);

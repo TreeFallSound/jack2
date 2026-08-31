@@ -27,6 +27,20 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 namespace Jack
 {
 
+/*!
+\brief Register a function to run on this thread just before it ends.
+
+Thread-local: the hook belongs to the thread that sets it, and runs from a
+cancellation handler in JackPosixThread::ThreadHandler. Cancellation is the
+usual way a client thread ends, and cancellation handlers run before the
+thread-specific-data destructors.
+
+This exists so that JackPosixThread needs no link-time dependency on the
+macOS-only JackWorkgroup sources: this file is compiled into libraries that
+do not contain them. NULL, the default, means there is nothing to do.
+*/
+SERVER_EXPORT void JackSetThreadExitHook(void (*hook)(void));
+
 /* use 512KB stack per thread - the default is way too high to be feasible
  * with mlockall() on many systems */
 #define THREAD_STACK 524288

@@ -1,7 +1,7 @@
 ChangeLog
 #########
 
-* Unreleased (sastraxi fork)
+* Unreleased (TreeFallSound fork)
 
   * netadapter: clear PI controller integrator on ringbuffer reset.
     ``JackPIControler::OurOfBounds()`` exists for this but had zero call
@@ -27,11 +27,45 @@ ChangeLog
     kernel-route-table behavior.
   * ``build-macos-pkg.sh`` — produces a ``.pkg`` installer that drops
     the fork's binaries, libs, headers, and intclient ``.so``s into
-    ``/usr/local`` on Apple Silicon (the manual-install prefix; Homebrew
+    ``/usr/local`` on Apple Silicon (the manual-instaSSll prefix; Homebrew
     is at ``/opt/homebrew``). Required because ``installer/build-pkg.sh``
     in the JackRouter repo ``check_jack``s a pre-installed jack2 and
     refuses to build without one — without this, fresh JackRouter users
     on Apple Silicon have no way to get the multicast-pin code.
+  * netJACK2 (master): recover from a slave that disappears without
+    sending ``KILL_MASTER`` (yanked cable, hard-killed slave). A master
+    whose RT link hits a fatal recv/send error marks itself dead
+    (``fDead``) and the manager reaps it on its next listen pass
+    (``ReapDeadMasters``) instead of stalling the master cycle ~2 s per
+    period indefinitely. Replaces the "ugly temporary fix" ``ThreadExit``
+    that had been in ``JackNetMasterInterface::FatalRecvError`` since 2008.
+  * netJACK2 (master): fix a use-after-free in ``KillMaster``. The old
+    ``erase(it); delete *it;`` freed through an iterator that ``erase``
+    had already invalidated. This path runs on the *normal* multicast
+    ``KILL_MASTER`` clean-stop, not only on edge cases.
+  * netJACK2 (master): dedupe masters by slave name in ``InitMaster``.
+    A slave that restarts quickly keeps feeding its old master packets,
+    so that master never times out or self-declares dead, and
+    ``FindMaster`` only matches ``fID`` which a re-announcing slave
+    lacks. Without the dedupe each re-announcement spawns another JACK
+    client (``pistomp-01``, ``-02``, ...) all fighting for the same ports.
+  * netJACK2: initialize ``fDead`` in the ``session_params_t``
+    constructor as well, so a master created through that path cannot
+    start life reading an indeterminate dead flag.
+  * netJACK2: fail closed when a requested multicast interface pin cannot
+    be applied. ``NewSocket()`` refuses the socket rather than letting
+    the slave fall back to the default route; the reconnect loop retries.
+  * netJACK2: pin *unicast* egress to an interface, not only the
+    multicast join. On Linux ``JACK_NETJACK_MULTICAST_IF`` set only
+    ``IP_MULTICAST_IF``, so the post-discovery unicast RT stream still
+    followed the default route and could leave over wifi when both the
+    wired and the wifi interface carried a ``169.254`` link-local
+    address. The slave now also applies ``IP_UNICAST_IF``; the master
+    captures the arrival interface of each ``SLAVE_AVAILABLE`` via
+    ``IP_PKTINFO``, latches the first one seen, and pins every spawned
+    master socket to it (``IP_BOUND_IF`` on macOS/BSD, ``IP_UNICAST_IF``
+    on Linux). Env-gated and fail-closed; the latch re-resolves if the
+    pinned interface disappears.
 
 * 1.9.22 (2023-02-02)
 

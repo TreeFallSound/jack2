@@ -352,11 +352,15 @@ struct JackNetExtMaster : public JackNetMasterInterface {
 
         /// Network init
         if (!JackNetMasterInterface::Init()) {
+            // Release the socket immediately so a caller's retry does not
+            // build on a wedged fd (same rationale as JackNetMaster::Init).
+            fSocket.Close();
             return -1;
         }
 
         // Set global parameters
         if (!SetParams()) {
+            fSocket.Close();
             return -1;
         }
 
