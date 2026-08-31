@@ -61,6 +61,27 @@ namespace Jack
             //sync and transport
             int fLastTransportState;
 
+            // Five-second, interval-based diagnostics. These fields are written
+            // only by the JACK process callback; reporting is deliberately
+            // rate-limited so the normal cycle does not emit per-packet logs.
+            uint64_t fDiagCycles = 0;
+            uint64_t fDiagDataPacketErrors = 0;
+            uint64_t fDiagSyncPacketErrors = 0;
+            uint64_t fDiagSocketErrors = 0;
+            uint64_t fDiagSlowCycles = 0;
+            uint64_t fDiagMaxProcessUsecs = 0;
+            uint64_t fDiagMaxSyncSendUsecs = 0;
+            uint64_t fDiagMaxDataSendUsecs = 0;
+            uint64_t fDiagMaxSyncRecvUsecs = 0;
+            uint64_t fDiagMaxDataRecvUsecs = 0;
+            jack_time_t fDiagLastReportUsecs = 0;
+
+            void RecordDiagnosticStage(uint64_t& max_usecs,
+                                        jack_time_t start,
+                                        jack_time_t end);
+            void FinishDiagnosticCycle(jack_time_t start, jack_time_t end);
+            void ReportDiagnosticsIfDue(jack_time_t now);
+
             //monitoring
 #ifdef JACK_MONITOR
             jack_time_t fPeriodUsecs;

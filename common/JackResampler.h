@@ -45,7 +45,13 @@ class JackRingBuffer
 
         jack_ringbuffer_t* fRingBuffer;
         unsigned int fRingBufferSize;
+        uint64_t fReadFailureCount;
+        uint64_t fWriteFailureCount;
+        jack_time_t fLastReadFailureReport;
+        jack_time_t fLastWriteFailureReport;
 
+        uint64_t ReadFailureReportCount();
+        uint64_t WriteFailureReportCount();
     public:
 
         JackRingBuffer(int size = DEFAULT_RB_SIZE);

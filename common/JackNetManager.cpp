@@ -478,14 +478,81 @@ namespace Jack
         }
     }
 
+    void JackNetMaster::RecordDiagnosticStage(uint64_t& max_usecs,
+                                               jack_time_t start,
+                                               jack_time_t end)
+    {
+        const uint64_t elapsed = (end >= start) ? (end - start) : 0;
+        if (elapsed > max_usecs) max_usecs = elapsed;
+    }
+
+    void JackNetMaster::FinishDiagnosticCycle(jack_time_t start, jack_time_t end)
+    {
+        const uint64_t elapsed = (end >= start) ? (end - start) : 0;
+        if (elapsed > fDiagMaxProcessUsecs) fDiagMaxProcessUsecs = elapsed;
+
+        const uint64_t period_usecs = fParams.fSampleRate
+            ? (1000000ULL * fParams.fPeriodSize / fParams.fSampleRate)
+            : 0;
+        if (period_usecs && elapsed > period_usecs) ++fDiagSlowCycles;
+
+        ReportDiagnosticsIfDue(end);
+    }
+
+    void JackNetMaster::ReportDiagnosticsIfDue(jack_time_t now)
+    {
+        static const jack_time_t kReportIntervalUsecs = 5000000;
+        if (fDiagLastReportUsecs == 0) {
+            fDiagLastReportUsecs = now;
+            return;
+        }
+        if (now - fDiagLastReportUsecs < kReportIntervalUsecs) return;
+
+        // This is intentionally one interval summary, not a per-packet log.
+        // The counters are written by this JACK process callback only; keeping
+        // the report here avoids locks or cross-thread reads in the RT path.
+        jack_info("NetMaster diagnostics slave=%s cycles=%llu "
+                  "dataPacketErrors=%llu syncPacketErrors=%llu "
+                  "socketErrors=%llu slowCycles=%llu "
+                  "maxProcessUsecs=%llu maxSyncSendUsecs=%llu "
+                  "maxDataSendUsecs=%llu maxSyncRecvUsecs=%llu "
+                  "maxDataRecvUsecs=%llu",
+                  fParams.fName,
+                  (unsigned long long)fDiagCycles,
+                  (unsigned long long)fDiagDataPacketErrors,
+                  (unsigned long long)fDiagSyncPacketErrors,
+                  (unsigned long long)fDiagSocketErrors,
+                  (unsigned long long)fDiagSlowCycles,
+                  (unsigned long long)fDiagMaxProcessUsecs,
+                  (unsigned long long)fDiagMaxSyncSendUsecs,
+                  (unsigned long long)fDiagMaxDataSendUsecs,
+                  (unsigned long long)fDiagMaxSyncRecvUsecs,
+                  (unsigned long long)fDiagMaxDataRecvUsecs);
+
+        fDiagCycles = 0;
+        fDiagDataPacketErrors = 0;
+        fDiagSyncPacketErrors = 0;
+        fDiagSocketErrors = 0;
+        fDiagSlowCycles = 0;
+        fDiagMaxProcessUsecs = 0;
+        fDiagMaxSyncSendUsecs = 0;
+        fDiagMaxDataSendUsecs = 0;
+        fDiagMaxSyncRecvUsecs = 0;
+        fDiagMaxDataRecvUsecs = 0;
+        fDiagLastReportUsecs = now;
+    }
+
     int JackNetMaster::Process()
     {
         if (!fRunning) {
             return 0;
         }
 
+        const jack_time_t process_start = GetMicroSeconds();
+        ++fDiagCycles;
+
 #ifdef JACK_MONITOR
-        jack_time_t begin_time = GetMicroSeconds();
+        jack_time_t begin_time = process_start;
         fNetTimeMon->New();
 #endif
 
@@ -542,35 +609,56 @@ namespace Jack
         // encode the first packet
         EncodeSyncPacket();
 
-        if (SyncSend() == SOCKET_ERROR) {
-            return SOCKET_ERROR;
+        jack_time_t stage_start = GetMicroSeconds();
+        int result = SyncSend();
+        jack_time_t stage_end = GetMicroSeconds();
+        RecordDiagnosticStage(fDiagMaxSyncSendUsecs, stage_start, stage_end);
+        if (result == SOCKET_ERROR) {
+            ++fDiagSocketErrors;
+            FinishDiagnosticCycle(process_start, stage_end);
+            return result;
         }
 
 #ifdef JACK_MONITOR
-        fNetTimeMon->Add((((float)(GetMicroSeconds() - begin_time)) / (float) fPeriodUsecs) * 100.f);
+        fNetTimeMon->Add((((float)(stage_end - begin_time)) / (float) fPeriodUsecs) * 100.f);
 #endif
 
         // send data
-        if (DataSend() == SOCKET_ERROR) {
-            return SOCKET_ERROR;
+        stage_start = GetMicroSeconds();
+        result = DataSend();
+        stage_end = GetMicroSeconds();
+        RecordDiagnosticStage(fDiagMaxDataSendUsecs, stage_start, stage_end);
+        if (result == SOCKET_ERROR) {
+            ++fDiagSocketErrors;
+            FinishDiagnosticCycle(process_start, stage_end);
+            return result;
         }
 
 #ifdef JACK_MONITOR
-        fNetTimeMon->Add((((float)(GetMicroSeconds() - begin_time)) / (float) fPeriodUsecs) * 100.f);
+        fNetTimeMon->Add((((float)(stage_end - begin_time)) / (float) fPeriodUsecs) * 100.f);
 #endif
 
         // receive sync
-        int res = SyncRecv();
-        switch (res) {
-        
+        stage_start = GetMicroSeconds();
+        result = SyncRecv();
+        stage_end = GetMicroSeconds();
+        RecordDiagnosticStage(fDiagMaxSyncRecvUsecs, stage_start, stage_end);
+        switch (result) {
+
             case NET_SYNCHING:
+                FinishDiagnosticCycle(process_start, stage_end);
+                return result;
+
             case SOCKET_ERROR:
-                return res;
-                
+                ++fDiagSocketErrors;
+                FinishDiagnosticCycle(process_start, stage_end);
+                return result;
+
             case SYNC_PACKET_ERROR:
+                 ++fDiagSyncPacketErrors;
                  // Since sync packet is incorrect, don't decode it and continue with data
                  break;
-                
+
             default:
                 // Decode sync
                 int unused_frames;
@@ -579,26 +667,35 @@ namespace Jack
         }
 
 #ifdef JACK_MONITOR
-        fNetTimeMon->Add((((float)(GetMicroSeconds() - begin_time)) / (float) fPeriodUsecs) * 100.f);
+        fNetTimeMon->Add((((float)(stage_end - begin_time)) / (float) fPeriodUsecs) * 100.f);
 #endif
-      
+
         // receive data
-        res = DataRecv();
-        switch (res) {
-        
+        stage_start = GetMicroSeconds();
+        result = DataRecv();
+        stage_end = GetMicroSeconds();
+        RecordDiagnosticStage(fDiagMaxDataRecvUsecs, stage_start, stage_end);
+        switch (result) {
+
             case 0:
+                break;
+
             case SOCKET_ERROR:
-                return res;
-                
+                ++fDiagSocketErrors;
+                FinishDiagnosticCycle(process_start, stage_end);
+                return result;
+
             case DATA_PACKET_ERROR:
+                ++fDiagDataPacketErrors;
                 // Well not a real XRun...
                 JackServerGlobals::fInstance->GetEngine()->NotifyClientXRun(ALL_CLIENTS);
                 break;
         }
 
 #ifdef JACK_MONITOR
-        fNetTimeMon->AddLast((((float)(GetMicroSeconds() - begin_time)) / (float) fPeriodUsecs) * 100.f);
+        fNetTimeMon->AddLast((((float)(stage_end - begin_time)) / (float) fPeriodUsecs) * 100.f);
 #endif
+        FinishDiagnosticCycle(process_start, stage_end);
         return 0;
     }
     

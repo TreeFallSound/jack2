@@ -19,12 +19,13 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 
 #include "JackResampler.h"
 #include "JackError.h"
+#include "JackTime.h"
 #include <stdio.h>
 
 namespace Jack
 {
 
-JackRingBuffer::JackRingBuffer(int size):fRingBufferSize(size)
+JackRingBuffer::JackRingBuffer(int size):fRingBufferSize(size), fReadFailureCount(0), fWriteFailureCount(0), fLastReadFailureReport(0), fLastWriteFailureReport(0)
 {
     fRingBuffer = jack_ringbuffer_create(sizeof(jack_default_audio_sample_t) * fRingBufferSize);
     Reset(fRingBufferSize);
@@ -45,6 +46,32 @@ void JackRingBuffer::Reset(unsigned int new_size)
     jack_ringbuffer_read_advance(fRingBuffer, (sizeof(jack_default_audio_sample_t) * new_size/2));
 }
 
+uint64_t JackRingBuffer::ReadFailureReportCount()
+{
+    ++fReadFailureCount;
+    jack_time_t now = GetMicroSeconds();
+    if (fLastReadFailureReport != 0 && now - fLastReadFailureReport < 1000000) {
+        return 0;
+    }
+    fLastReadFailureReport = now;
+    uint64_t count = fReadFailureCount;
+    fReadFailureCount = 0;
+    return count;
+}
+
+uint64_t JackRingBuffer::WriteFailureReportCount()
+{
+    ++fWriteFailureCount;
+    jack_time_t now = GetMicroSeconds();
+    if (fLastWriteFailureReport != 0 && now - fLastWriteFailureReport < 1000000) {
+        return 0;
+    }
+    fLastWriteFailureReport = now;
+    uint64_t count = fWriteFailureCount;
+    fWriteFailureCount = 0;
+    return count;
+}
+
 unsigned int JackRingBuffer::ReadSpace()
 {
     return (jack_ringbuffer_read_space(fRingBuffer) / sizeof(jack_default_audio_sample_t));
@@ -58,10 +85,12 @@ unsigned int JackRingBuffer::WriteSpace()
 unsigned int JackRingBuffer::Read(jack_default_audio_sample_t* buffer, unsigned int frames)
 {
     size_t len = jack_ringbuffer_read_space(fRingBuffer);
-    jack_log("JackRingBuffer::Read input available = %ld", len / sizeof(jack_default_audio_sample_t));
 
     if (len < frames * sizeof(jack_default_audio_sample_t)) {
-        jack_error("JackRingBuffer::Read : producer too slow, missing frames = %d", frames);
+        uint64_t failure_count = ReadFailureReportCount();
+        if (failure_count > 0) {
+            jack_error("JackRingBuffer::Read : producer too slow, missing frames = %d; failures since last report = %llu", frames, (unsigned long long)failure_count);
+        }
         return 0;
     } else {
         jack_ringbuffer_read(fRingBuffer, (char*)buffer, frames * sizeof(jack_default_audio_sample_t));
@@ -72,10 +101,12 @@ unsigned int JackRingBuffer::Read(jack_default_audio_sample_t* buffer, unsigned 
 unsigned int JackRingBuffer::Write(jack_default_audio_sample_t* buffer, unsigned int frames)
 {
     size_t len = jack_ringbuffer_write_space(fRingBuffer);
-    jack_log("JackRingBuffer::Write output available = %ld", len / sizeof(jack_default_audio_sample_t));
 
     if (len < frames * sizeof(jack_default_audio_sample_t)) {
-        jack_error("JackRingBuffer::Write : consumer too slow, skip frames = %d", frames);
+        uint64_t failure_count = WriteFailureReportCount();
+        if (failure_count > 0) {
+            jack_error("JackRingBuffer::Write : consumer too slow, skip frames = %d; failures since last report = %llu", frames, (unsigned long long)failure_count);
+        }
         return 0;
     } else {
         jack_ringbuffer_write(fRingBuffer, (char*)buffer, frames * sizeof(jack_default_audio_sample_t));
@@ -86,10 +117,12 @@ unsigned int JackRingBuffer::Write(jack_default_audio_sample_t* buffer, unsigned
 unsigned int JackRingBuffer::Read(void* buffer, unsigned int bytes)
 {
     size_t len = jack_ringbuffer_read_space(fRingBuffer);
-    jack_log("JackRingBuffer::Read input available = %ld", len);
 
     if (len < bytes) {
-        jack_error("JackRingBuffer::Read : producer too slow, missing bytes = %d", bytes);
+        uint64_t failure_count = ReadFailureReportCount();
+        if (failure_count > 0) {
+            jack_error("JackRingBuffer::Read : producer too slow, missing bytes = %d; failures since last report = %llu", bytes, (unsigned long long)failure_count);
+        }
         return 0;
     } else {
         jack_ringbuffer_read(fRingBuffer, (char*)buffer, bytes);
@@ -100,10 +133,12 @@ unsigned int JackRingBuffer::Read(void* buffer, unsigned int bytes)
 unsigned int JackRingBuffer::Write(void* buffer, unsigned int bytes)
 {
     size_t len = jack_ringbuffer_write_space(fRingBuffer);
-    jack_log("JackRingBuffer::Write output available = %ld", len);
 
     if (len < bytes) {
-        jack_error("JackRingBuffer::Write : consumer too slow, skip bytes = %d", bytes);
+        uint64_t failure_count = WriteFailureReportCount();
+        if (failure_count > 0) {
+            jack_error("JackRingBuffer::Write : consumer too slow, skip bytes = %d; failures since last report = %llu", bytes, (unsigned long long)failure_count);
+        }
         return 0;
     } else {
         jack_ringbuffer_write(fRingBuffer, (char*)buffer, bytes);
