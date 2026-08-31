@@ -20,12 +20,13 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include "JackResampler.h"
 #include "JackError.h"
 #include "JackTime.h"
+#include <atomic>
 #include <stdio.h>
 
 namespace Jack
 {
 
-JackRingBuffer::JackRingBuffer(int size):fRingBufferSize(size), fReadFailureCount(0), fWriteFailureCount(0), fLastReadFailureReport(0), fLastWriteFailureReport(0)
+JackRingBuffer::JackRingBuffer(int size):fRingBufferSize(size)
 {
     fRingBuffer = jack_ringbuffer_create(sizeof(jack_default_audio_sample_t) * fRingBufferSize);
     Reset(fRingBufferSize);
@@ -46,30 +47,39 @@ void JackRingBuffer::Reset(unsigned int new_size)
     jack_ringbuffer_read_advance(fRingBuffer, (sizeof(jack_default_audio_sample_t) * new_size/2));
 }
 
-uint64_t JackRingBuffer::ReadFailureReportCount()
-{
-    ++fReadFailureCount;
-    jack_time_t now = GetMicroSeconds();
-    if (fLastReadFailureReport != 0 && now - fLastReadFailureReport < 1000000) {
+namespace {
+    std::atomic<uint64_t> gReadFailureCount(0);
+    std::atomic<uint64_t> gWriteFailureCount(0);
+    std::atomic<jack_time_t> gLastReadFailureReport(0);
+    std::atomic<jack_time_t> gLastWriteFailureReport(0);
+
+    static_assert(__atomic_always_lock_free(sizeof(uint64_t), 0), "ring failure counters must be lock-free");
+
+    uint64_t TakeFailureReportCount(std::atomic<uint64_t>& count,
+                                    std::atomic<jack_time_t>& last_report)
+    {
+        count.fetch_add(1, std::memory_order_relaxed);
+        jack_time_t now = GetMicroSeconds();
+        jack_time_t last = last_report.load(std::memory_order_relaxed);
+        if (last == 0 || now - last >= 1000000) {
+            if (last_report.compare_exchange_strong(last, now,
+                                                    std::memory_order_relaxed,
+                                                    std::memory_order_relaxed)) {
+                return count.exchange(0, std::memory_order_relaxed);
+            }
+        }
         return 0;
     }
-    fLastReadFailureReport = now;
-    uint64_t count = fReadFailureCount;
-    fReadFailureCount = 0;
-    return count;
+}
+
+uint64_t JackRingBuffer::ReadFailureReportCount()
+{
+    return TakeFailureReportCount(gReadFailureCount, gLastReadFailureReport);
 }
 
 uint64_t JackRingBuffer::WriteFailureReportCount()
 {
-    ++fWriteFailureCount;
-    jack_time_t now = GetMicroSeconds();
-    if (fLastWriteFailureReport != 0 && now - fLastWriteFailureReport < 1000000) {
-        return 0;
-    }
-    fLastWriteFailureReport = now;
-    uint64_t count = fWriteFailureCount;
-    fWriteFailureCount = 0;
-    return count;
+    return TakeFailureReportCount(gWriteFailureCount, gLastWriteFailureReport);
 }
 
 unsigned int JackRingBuffer::ReadSpace()
